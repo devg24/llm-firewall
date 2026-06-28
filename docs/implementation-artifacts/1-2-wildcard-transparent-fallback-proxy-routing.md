@@ -1,5 +1,5 @@
 ---
-baseline_commit: NO_VCS
+baseline_commit: bcd3ced6ffd281f64022f44cc68569e659675f38
 ---
 # Story 1.2: Wildcard Transparent Fallback Proxy Routing
 
