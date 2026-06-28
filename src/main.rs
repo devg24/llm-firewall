@@ -1,0 +1,389 @@
+use axum::{response::IntoResponse, routing::get, Router};
+use std::net::SocketAddr;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+
+mod proxy;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub client: reqwest::Client,
+    pub upstream_url: reqwest::Url,
+}
+
+fn init_logging() {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+        .try_init();
+}
+
+fn parse_port(port_env: Option<String>) -> Result<u16, String> {
+    match port_env {
+        Some(val) => {
+            let trimmed = val.trim();
+            if trimmed.is_empty() {
+                Ok(3000)
+            } else {
+                trimmed.parse::<u16>().map_err(|e| format!("Invalid port '{}': {}", trimmed, e))
+            }
+        }
+        None => Ok(3000),
+    }
+}
+
+fn parse_upstream_url(url_env: Result<String, std::env::VarError>) -> Result<reqwest::Url, String> {
+    match url_env {
+        Ok(val) => {
+            let trimmed = val.trim();
+            if trimmed.is_empty() {
+                reqwest::Url::parse("https://api.openai.com").map_err(|e| e.to_string())
+            } else {
+                let parsed = reqwest::Url::parse(trimmed)
+                    .map_err(|e| format!("Invalid UPSTREAM_URL '{}': {}", trimmed, e))?;
+                if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                    return Err(format!("Invalid UPSTREAM_URL '{}': Scheme must be http or https", trimmed));
+                }
+                if parsed.host().is_none() {
+                    return Err(format!("Invalid UPSTREAM_URL '{}': Missing host", trimmed));
+                }
+                Ok(parsed)
+            }
+        }
+        Err(std::env::VarError::NotPresent) => {
+            reqwest::Url::parse("https://api.openai.com").map_err(|e| e.to_string())
+        }
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("UPSTREAM_URL environment variable is not valid unicode".to_string())
+        }
+    }
+}
+
+pub fn create_app(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(|| async { "OK" }))
+        .route(
+            "/v1/chat/completions",
+            axum::routing::any(|method: axum::http::Method, state: axum::extract::State<AppState>, req: axum::http::Request<axum::body::Body>| async move {
+                if method == axum::http::Method::POST {
+                    axum::http::StatusCode::NOT_IMPLEMENTED.into_response()
+                } else {
+                    proxy::proxy_handler(
+                        state,
+                        method,
+                        req.uri().clone(),
+                        req.headers().clone(),
+                        req.into_body(),
+                    )
+                    .await
+                }
+            }),
+        )
+        .route("/{*path}", axum::routing::any(proxy::proxy_handler))
+        .with_state(state)
+}
+
+#[tokio::main]
+async fn main() {
+    init_logging();
+    
+    let port_var = match std::env::var("PORT") {
+        Ok(val) => Some(val),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            tracing::error!("Fatal: PORT environment variable is not valid unicode");
+            std::process::exit(1);
+        }
+        Err(std::env::VarError::NotPresent) => None,
+    };
+    
+    let port = parse_port(port_var).unwrap_or_else(|e| {
+        tracing::error!("Fatal: {}", e);
+        std::process::exit(1);
+    });
+
+    let upstream_var = std::env::var("UPSTREAM_URL");
+    let upstream_url = parse_upstream_url(upstream_var).unwrap_or_else(|e| {
+        tracing::error!("Fatal: {}", e);
+        std::process::exit(1);
+    });
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .read_timeout(std::time::Duration::from_secs(300))
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .build()
+        .unwrap_or_else(|e| {
+            tracing::error!("Fatal: Failed to initialize reqwest client: {}", e);
+            std::process::exit(1);
+        });
+
+    let state = AppState {
+        client,
+        upstream_url,
+    };
+    
+    let app = create_app(state);
+    
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("Failed to bind to port {}: {}", port, e);
+            std::process::exit(1);
+        }
+    };
+    
+    let bound_addr = listener.local_addr().unwrap_or(addr);
+    tracing::info!("Server started successfully and listening on {}", bound_addr);
+    
+    if let Err(e) = axum::serve(listener, app).await {
+        tracing::error!("Server error: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::Response;
+
+    #[test]
+    fn test_parse_port_default() {
+        assert_eq!(parse_port(None), Ok(3000));
+    }
+
+    #[test]
+    fn test_parse_port_valid() {
+        assert_eq!(parse_port(Some("4000".to_string())), Ok(4000));
+    }
+
+    #[test]
+    fn test_parse_port_invalid() {
+        assert!(parse_port(Some("invalid".to_string())).is_err());
+        assert!(parse_port(Some("-1".to_string())).is_err());
+        assert!(parse_port(Some("65536".to_string())).is_err());
+    }
+
+    #[test]
+    fn test_parse_port_empty() {
+        assert_eq!(parse_port(Some("".to_string())), Ok(3000));
+        assert_eq!(parse_port(Some("   ".to_string())), Ok(3000));
+    }
+
+    #[test]
+    fn test_parse_upstream_url_default() {
+        let url = parse_upstream_url(Err(std::env::VarError::NotPresent)).unwrap();
+        assert_eq!(url.as_str(), "https://api.openai.com/");
+    }
+
+    #[test]
+    fn test_parse_upstream_url_empty() {
+        let url = parse_upstream_url(Ok("".to_string())).unwrap();
+        assert_eq!(url.as_str(), "https://api.openai.com/");
+
+        let url = parse_upstream_url(Ok("   ".to_string())).unwrap();
+        assert_eq!(url.as_str(), "https://api.openai.com/");
+    }
+
+    #[test]
+    fn test_parse_upstream_url_valid() {
+        let url = parse_upstream_url(Ok("http://localhost:8080".to_string())).unwrap();
+        assert_eq!(url.as_str(), "http://localhost:8080/");
+    }
+
+    #[test]
+    fn test_parse_upstream_url_invalid() {
+        assert!(parse_upstream_url(Ok("not_a_url".to_string())).is_err());
+        assert!(parse_upstream_url(Ok("ftp://example.com".to_string())).is_err());
+        assert!(parse_upstream_url(Err(std::env::VarError::NotUnicode(
+            std::ffi::OsString::new()
+        )))
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn test_health_endpoint() {
+        let client = reqwest::Client::new();
+        let upstream_url = reqwest::Url::parse("https://api.openai.com").unwrap();
+        let state = AppState { client, upstream_url };
+        
+        let app = create_app(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("http://{}/health", addr))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let text = response.text().await.unwrap();
+        assert_eq!(text, "OK");
+    }
+
+    #[tokio::test]
+    async fn test_proxy_transparent_fallback() {
+        use axum::routing::any;
+        use axum::body::Bytes;
+        
+        // 1. Spawn mock upstream server
+        let upstream_app = Router::new().route(
+            "/{*path}",
+            any(|method: axum::http::Method, uri: axum::http::Uri, headers: axum::http::HeaderMap, body: Bytes| async move {
+                let builder = Response::builder()
+                    .status(axum::http::StatusCode::OK)
+                    .header("x-received-method", method.as_str())
+                    .header("x-received-uri", uri.to_string())
+                    .header("x-upstream-response-header", "custom-val")
+                    .header("connection", "close, x-res-hop")
+                    .header("x-res-hop", "should-be-dropped-by-proxy");
+
+                let body_str = std::str::from_utf8(&body).unwrap_or("").to_string();
+                let multi_vals: Vec<String> = headers
+                    .get_all("x-multi")
+                    .iter()
+                    .map(|v| v.to_str().unwrap_or("").to_string())
+                    .collect();
+
+                let response_data = serde_json::json!({
+                    "path": uri.path(),
+                    "host_header": headers.get("host").map(|v| v.to_str().unwrap_or("")),
+                    "auth_header": headers.get("authorization").map(|v| v.to_str().unwrap_or("")),
+                    "connection_header": headers.get("connection").map(|v| v.to_str().unwrap_or("")),
+                    "custom_header": headers.get("x-custom").map(|v| v.to_str().unwrap_or("")),
+                    "another_hop": headers.get("x-another-hop").map(|v| v.to_str().unwrap_or("")),
+                    "multi_header": multi_vals,
+                    "body": body_str,
+                });
+
+                builder.body(axum::body::Body::from(serde_json::to_vec(&response_data).unwrap())).unwrap()
+            }),
+        );
+
+        let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        
+        tokio::spawn(async move {
+            axum::serve(upstream_listener, upstream_app).await.unwrap();
+        });
+
+        // 2. Spawn proxy server
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .read_timeout(std::time::Duration::from_secs(300))
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .build()
+            .unwrap();
+        // Set a path prefix in the upstream URL
+        let upstream_url = reqwest::Url::parse(&format!("http://{}/api/v2", upstream_addr)).unwrap();
+        let state = AppState { client, upstream_url };
+        
+        let proxy_app = create_app(state);
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        
+        tokio::spawn(async move {
+            axum::serve(proxy_listener, proxy_app).await.unwrap();
+        });
+
+        // Give servers a tiny bit of time to start
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // 3. Send test request to proxy
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("http://{}/v1/models?foo=bar", proxy_addr))
+            .header("Authorization", "Bearer test-key")
+            .header("Connection", "keep-alive, x-another-hop") // custom client hop header
+            .header("X-Another-Hop", "should-be-dropped")
+            .header("X-Custom", "my-custom-header")
+            .header("X-Multi", "val1")
+            .header("X-Multi", "val2")
+            .body("hello world request body")
+            .send()
+            .await
+            .unwrap();
+
+        // 4. Assertions on response
+        // Verify response status
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        
+        // Verify response headers
+        assert_eq!(response.headers().get("x-upstream-response-header").unwrap(), "custom-val");
+        assert!(response.headers().get("connection").is_none() || response.headers().get("connection").unwrap() != "close");
+        assert!(response.headers().get("x-res-hop").is_none());
+
+        // Verify body and forwarded headers
+        let json_body: serde_json::Value = response.json().await.unwrap();
+        
+        assert_eq!(json_body["auth_header"], "Bearer test-key");
+        assert_eq!(json_body["custom_header"], "my-custom-header");
+        assert_eq!(json_body["body"], "hello world request body");
+        
+        // Verify connection-specified hop header was dropped
+        assert!(json_body["another_hop"].is_null());
+        assert_ne!(json_body["connection_header"], "keep-alive");
+        
+        // Verify host header was rewritten to match upstream
+        assert_eq!(json_body["host_header"], upstream_addr.to_string());
+
+        // Verify multi-value headers are preserved
+        let multi_vals = json_body["multi_header"].as_array().unwrap();
+        assert_eq!(multi_vals.len(), 2);
+        assert_eq!(multi_vals[0], "val1");
+        assert_eq!(multi_vals[1], "val2");
+
+        // Verify path prefix preservation
+        assert_eq!(json_body["path"], "/api/v2/v1/models");
+
+        // 5. Verify GET /v1/chat/completions is proxied correctly (only POST is stubbed)
+        let get_completions_response = client
+            .get(format!("http://{}/v1/chat/completions", proxy_addr))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(get_completions_response.status(), reqwest::StatusCode::OK);
+        let completions_body: serde_json::Value = get_completions_response.json().await.unwrap();
+        assert_eq!(completions_body["path"], "/api/v2/v1/chat/completions");
+    }
+
+    #[tokio::test]
+    async fn test_proxy_chat_completions_stub() {
+        let client = reqwest::Client::new();
+        let upstream_url = reqwest::Url::parse("https://api.openai.com").unwrap();
+        let state = AppState { client, upstream_url };
+        
+        let app = create_app(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let client = reqwest::Client::new();
+        let response = client
+            .post(format!("http://{}/v1/chat/completions", addr))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_IMPLEMENTED);
+    }
+}
