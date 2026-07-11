@@ -1214,6 +1214,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "futures-core",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",
