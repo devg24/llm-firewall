@@ -32,18 +32,17 @@ fn merge_queries(upstream_url: &reqwest::Url, client_query: Option<&str>) -> Opt
 
     // 1. First add upstream queries, record keys to avoid overrides
     for (k, v) in upstream_url.query_pairs() {
-        pairs.push((k.clone().into_owned(), v.clone().into_owned()));
-        keys.insert(k.into_owned());
+        let key_str = k.into_owned();
+        pairs.push((key_str.clone(), v.into_owned()));
+        keys.insert(key_str);
     }
 
     // 2. Add client queries if the key wasn't defined by upstream
     if let Some(cq) = client_query {
-        // Construct dummy url to parse client query safely
-        if let Ok(dummy) = reqwest::Url::parse(&format!("http://a/?{}", cq)) {
-            for (k, v) in dummy.query_pairs() {
-                if !keys.contains(k.as_ref()) {
-                    pairs.push((k.clone().into_owned(), v.clone().into_owned()));
-                }
+        for (k, v) in url::form_urlencoded::parse(cq.as_bytes()) {
+            let key_str = k.into_owned();
+            if !keys.contains(&key_str) {
+                pairs.push((key_str, v.into_owned()));
             }
         }
     }
@@ -196,7 +195,7 @@ fn extract_res_hop_headers(headers: &reqwest::header::HeaderMap) -> Result<Vec<S
     let mut custom_res_hop_headers = Vec::new();
     for conn_val in headers.get_all(reqwest::header::CONNECTION) {
         let conn_str = conn_val.to_str()
-            .map_err(|_| ProxyError::Internal("Invalid response Connection header".to_string()))?;
+            .map_err(|_| ProxyError::Upstream("Invalid response Connection header".to_string()))?;
         for part in conn_str.split(',') {
             let trimmed = part.trim();
             if !trimmed.is_empty() {
@@ -217,7 +216,7 @@ fn copy_request_headers(
     for (name, value) in headers.iter() {
         let name_str = name.as_str();
         if !is_hop_by_hop(name)
-            && !custom_hop_headers.contains(&name_str.to_lowercase())
+            && !custom_hop_headers.iter().any(|h| name_str.eq_ignore_ascii_case(h))
             && !name_str.eq_ignore_ascii_case("transfer-encoding")
         {
             req_headers.append(name.clone(), value.clone());
@@ -243,7 +242,7 @@ fn copy_response_headers(headers: &reqwest::header::HeaderMap) -> Result<HeaderM
     for (name, value) in headers.iter() {
         let name_str = name.as_str();
         if !is_hop_by_hop(name)
-            && !custom_res_hop_headers.contains(&name_str.to_lowercase())
+            && !custom_res_hop_headers.iter().any(|h| name_str.eq_ignore_ascii_case(h))
             && !name_str.eq_ignore_ascii_case("transfer-encoding")
         {
             res_headers.append(name.clone(), value.clone());

@@ -4,31 +4,51 @@ pub fn process_completions_payload(payload: &mut serde_json::Value) -> Result<()
         .and_then(|m| m.as_array_mut())
         .ok_or_else(|| "Missing or invalid 'messages' array".to_string())?;
 
+    let mut state = RedactionState::new();
+
     for message in messages {
         if let Some(content) = message.get_mut("content") {
-            mutate_content_field(content);
+            mutate_content_field(content, &mut state);
+        }
+        if let Some(name) = message.get_mut("name") {
+            mutate_content_field(name, &mut state);
+        }
+        if let Some(tool_calls) = message.get_mut("tool_calls") {
+            mutate_content_field(tool_calls, &mut state);
+        }
+        if let Some(function_call) = message.get_mut("function_call") {
+            mutate_content_field(function_call, &mut state);
         }
     }
     Ok(())
 }
 
-fn mutate_content_field(content: &mut serde_json::Value) {
+fn mutate_content_field(content: &mut serde_json::Value, state: &mut RedactionState) {
     match content {
         serde_json::Value::String(s) => {
-            *s = "[REDACTED_DUMMY]".to_string();
+            let normalized = normalize_text(s);
+            let mut matches = collect_regex_matches(&normalized);
+            resolve_overlaps(&mut matches);
+            *s = redact_text(&normalized, &matches, state);
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                mutate_content_field(item);
+                mutate_content_field(item, state);
             }
         }
         serde_json::Value::Object(obj) => {
             if let Some(serde_json::Value::String(text_val)) = obj.get_mut("text") {
-                *text_val = "[REDACTED_DUMMY]".to_string();
+                let normalized = normalize_text(text_val);
+                let mut matches = collect_regex_matches(&normalized);
+                resolve_overlaps(&mut matches);
+                *text_val = redact_text(&normalized, &matches, state);
             }
             for (key, val) in obj.iter_mut() {
-                if key != "image_url" && key != "type" && key != "role" && key != "text" {
-                    mutate_content_field(val);
+                if key != "image_url" && key != "type" && key != "role" {
+                    if key == "text" && val.is_string() {
+                        continue;
+                    }
+                    mutate_content_field(val, state);
                 }
             }
         }
@@ -44,12 +64,14 @@ static CC_REGEX: OnceLock<Regex> = OnceLock::new();
 static EMAIL_REGEX: OnceLock<Regex> = OnceLock::new();
 static PHONE_REGEX: OnceLock<Regex> = OnceLock::new();
 static IP_REGEX: OnceLock<Regex> = OnceLock::new();
+static IPV6_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const SSN_PATTERN: &str = r"\b\d{3}-\d{2}-\d{4}\b";
-const CC_PATTERN: &str = r"\b(?:\d[ -]*?){13,16}\b";
+const CC_PATTERN: &str = r"\b(?:\d[ -]*?){13,19}\b";
 const EMAIL_PATTERN: &str = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b";
-const PHONE_PATTERN: &str = r"\b(?:\+?\d{1,3}[- ]?)?\(?\d{3}\)?[- ]?\d{3}[- ]?\d{4}\b";
+const PHONE_PATTERN: &str = r"\b(?:\+?\d{1,3}[- .]?)?\(?\d{3}\)?[- .]?\d{3}[- .]?\d{4}\b";
 const IP_PATTERN: &str = r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b";
+const IPV6_PATTERN: &str = r"(?i)\b(?:[0-9a-fA-F]{1,4}:){3,7}[0-9a-fA-F]{1,4}\b|(?:\b(?:[0-9a-fA-F]{1,4}:){1,6})?::(?:[0-9a-fA-F]{1,4}\b)?|::[0-9a-fA-F]{1,4}\b";
 
 pub fn init_regexes() {
     let _ = SSN_REGEX.get_or_init(|| Regex::new(SSN_PATTERN).unwrap());
@@ -57,6 +79,7 @@ pub fn init_regexes() {
     let _ = EMAIL_REGEX.get_or_init(|| Regex::new(EMAIL_PATTERN).unwrap());
     let _ = PHONE_REGEX.get_or_init(|| Regex::new(PHONE_PATTERN).unwrap());
     let _ = IP_REGEX.get_or_init(|| Regex::new(IP_PATTERN).unwrap());
+    let _ = IPV6_REGEX.get_or_init(|| Regex::new(IPV6_PATTERN).unwrap());
 }
 
 #[allow(dead_code)]
@@ -82,6 +105,188 @@ pub fn phone_regex() -> &'static Regex {
 #[allow(dead_code)]
 pub fn ip_regex() -> &'static Regex {
     IP_REGEX.get_or_init(|| Regex::new(IP_PATTERN).unwrap())
+}
+
+#[allow(dead_code)]
+pub fn ipv6_regex() -> &'static Regex {
+    IPV6_REGEX.get_or_init(|| Regex::new(IPV6_PATTERN).unwrap())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PiiType {
+    Ssn,
+    Cc,
+    Email,
+    Phone,
+    Ip,
+}
+
+impl PiiType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PiiType::Ssn => "SSN",
+            PiiType::Cc => "CC",
+            PiiType::Email => "EMAIL",
+            PiiType::Phone => "PHONE",
+            PiiType::Ip => "IP",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct PiiMatch {
+    pub start: usize,
+    pub end: usize,
+    pub pii_type: PiiType,
+    pub value: String,
+}
+
+pub fn normalize_text(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == '\u{200B}' || c == '\u{200C}' || c == '\u{200D}' {
+            continue;
+        }
+        if c.is_control() {
+            if c == '\n' || c == '\r' || c == '\t' {
+                normalized.push(c);
+            }
+            continue;
+        }
+        normalized.push(c);
+    }
+    normalized
+}
+
+pub fn collect_regex_matches(text: &str) -> Vec<PiiMatch> {
+    let mut matches = Vec::new();
+
+    // 1. SSN
+    for mat in ssn_regex().find_iter(text) {
+        matches.push(PiiMatch {
+            start: mat.start(),
+            end: mat.end(),
+            pii_type: PiiType::Ssn,
+            value: mat.as_str().to_string(),
+        });
+    }
+    // 2. CC
+    for mat in cc_regex().find_iter(text) {
+        matches.push(PiiMatch {
+            start: mat.start(),
+            end: mat.end(),
+            pii_type: PiiType::Cc,
+            value: mat.as_str().to_string(),
+        });
+    }
+    // 3. Email
+    for mat in email_regex().find_iter(text) {
+        matches.push(PiiMatch {
+            start: mat.start(),
+            end: mat.end(),
+            pii_type: PiiType::Email,
+            value: mat.as_str().to_string(),
+        });
+    }
+    // 4. Phone
+    for mat in phone_regex().find_iter(text) {
+        matches.push(PiiMatch {
+            start: mat.start(),
+            end: mat.end(),
+            pii_type: PiiType::Phone,
+            value: mat.as_str().to_string(),
+        });
+    }
+    // 5. IP
+    for mat in ip_regex().find_iter(text) {
+        matches.push(PiiMatch {
+            start: mat.start(),
+            end: mat.end(),
+            pii_type: PiiType::Ip,
+            value: mat.as_str().to_string(),
+        });
+    }
+    // 6. IPv6
+    for mat in ipv6_regex().find_iter(text) {
+        matches.push(PiiMatch {
+            start: mat.start(),
+            end: mat.end(),
+            pii_type: PiiType::Ip,
+            value: mat.as_str().to_string(),
+        });
+    }
+
+    matches
+}
+
+pub fn resolve_overlaps(matches: &mut Vec<PiiMatch>) {
+    matches.sort_by(|a, b| {
+        a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end))
+    });
+
+    let mut resolved: Vec<PiiMatch> = Vec::with_capacity(matches.len());
+
+    for m in matches.drain(..) {
+        if resolved.is_empty() || m.start >= resolved.last().unwrap().end {
+            resolved.push(m);
+        } else {
+            if let Some(last) = resolved.last_mut() {
+                if m.end > last.end {
+                    last.end = m.end;
+                }
+            }
+        }
+    }
+    *matches = resolved;
+}
+
+use std::collections::HashMap;
+
+pub struct RedactionState {
+    pub map: HashMap<(String, PiiType), String>,
+    pub counters: HashMap<PiiType, usize>,
+}
+
+impl RedactionState {
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            counters: HashMap::new(),
+        }
+    }
+
+    pub fn get_or_create_token(&mut self, value: &str, pii_type: PiiType) -> String {
+        let key = (value.to_lowercase(), pii_type);
+        if let Some(token) = self.map.get(&key) {
+            token.clone()
+        } else {
+            let count = self.counters.entry(pii_type).or_insert(0);
+            *count += 1;
+            let token = format!("[REDACTED_{}_{}]", pii_type.as_str(), count);
+            self.map.insert(key, token.clone());
+            token
+        }
+    }
+}
+
+pub fn redact_text(text: &str, matches: &[PiiMatch], state: &mut RedactionState) -> String {
+    let mut redacted = String::with_capacity(text.len());
+    let mut last_idx = 0;
+
+    for m in matches {
+        if m.start > last_idx {
+            redacted.push_str(&text[last_idx..m.start]);
+        }
+        let token = state.get_or_create_token(&m.value, m.pii_type);
+        redacted.push_str(&token);
+        last_idx = m.end;
+    }
+
+    if last_idx < text.len() {
+        redacted.push_str(&text[last_idx..]);
+    }
+
+    redacted
 }
 
 #[cfg(test)]
@@ -146,6 +351,137 @@ mod tests {
         // Invalid IPs
         assert!(!re.is_match("999.999.999.999"), "Should reject out-of-range octets");
         assert!(!re.is_match("256.1.2.3"), "Should reject out-of-range first octet");
+    }
+
+    #[test]
+    fn test_text_normalization() {
+        let input = "Hello\u{200B} World!\u{0000}\nPreserved\t\r";
+        let output = normalize_text(input);
+        assert_eq!(output, "Hello World!\nPreserved\t\r");
+    }
+
+    #[test]
+    fn test_resolve_overlaps() {
+        let mut matches = vec![
+            PiiMatch { start: 10, end: 20, pii_type: PiiType::Cc, value: "1234567890123456".to_string() },
+            PiiMatch { start: 12, end: 18, pii_type: PiiType::Phone, value: "123456".to_string() },
+            PiiMatch { start: 25, end: 35, pii_type: PiiType::Email, value: "a@b.com".to_string() },
+        ];
+        resolve_overlaps(&mut matches);
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].pii_type, PiiType::Cc);
+        assert_eq!(matches[1].pii_type, PiiType::Email);
+    }
+
+    #[test]
+    fn test_co_reference_mapping_consistency() {
+        let mut state = RedactionState::new();
+        let token1 = state.get_or_create_token("123-45-6789", PiiType::Ssn);
+        let token2 = state.get_or_create_token("123-45-6789", PiiType::Ssn);
+        assert_eq!(token1, "[REDACTED_SSN_1]");
+        assert_eq!(token2, "[REDACTED_SSN_1]");
+
+        let token3 = state.get_or_create_token("987-65-4321", PiiType::Ssn);
+        assert_eq!(token3, "[REDACTED_SSN_2]");
+
+        let token_email = state.get_or_create_token("test@example.com", PiiType::Email);
+        assert_eq!(token_email, "[REDACTED_EMAIL_1]");
+    }
+
+    #[test]
+    fn test_single_pass_redaction() {
+        let text = "My SSN is 123-45-6789 and my friend's SSN is also 123-45-6789. Another friend has 987-65-4321.";
+        let normalized = normalize_text(text);
+        let mut matches = collect_regex_matches(&normalized);
+        resolve_overlaps(&mut matches);
+
+        let mut state = RedactionState::new();
+        let redacted = redact_text(&normalized, &matches, &mut state);
+
+        assert_eq!(
+            redacted,
+            "My SSN is [REDACTED_SSN_1] and my friend's SSN is also [REDACTED_SSN_1]. Another friend has [REDACTED_SSN_2]."
+        );
+    }
+
+    #[test]
+    fn test_ipv6_regex() {
+        let re = ipv6_regex();
+        assert!(re.is_match("2001:db8:3333:4444:5555:6666:7777:8888"));
+        assert!(re.is_match("2001:db8::1234"));
+        assert!(re.is_match("::1"));
+    }
+
+    #[test]
+    fn test_zwnj_normalization() {
+        let input = "Hello\u{200C}World\u{200D}!";
+        assert_eq!(normalize_text(input), "HelloWorld!");
+    }
+
+    #[test]
+    fn test_type_partitioned_co_reference() {
+        let mut state = RedactionState::new();
+        // Same value under different PII types gets different tokens
+        let tok1 = state.get_or_create_token("123-456-7890", PiiType::Phone);
+        let tok2 = state.get_or_create_token("123-456-7890", PiiType::Cc);
+        assert_eq!(tok1, "[REDACTED_PHONE_1]");
+        assert_eq!(tok2, "[REDACTED_CC_1]");
+        
+        // Case insensitive check
+        let tok3 = state.get_or_create_token("TEST@EXAMPLE.COM", PiiType::Email);
+        let tok4 = state.get_or_create_token("test@example.com", PiiType::Email);
+        assert_eq!(tok3, "[REDACTED_EMAIL_1]");
+        assert_eq!(tok4, "[REDACTED_EMAIL_1]");
+    }
+
+    #[test]
+    fn test_resolve_overlaps_extended() {
+        let mut matches = vec![
+            PiiMatch { start: 10, end: 20, pii_type: PiiType::Ssn, value: "123-45-6789".to_string() },
+            PiiMatch { start: 15, end: 25, pii_type: PiiType::Phone, value: "6789012".to_string() },
+        ];
+        resolve_overlaps(&mut matches);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].start, 10);
+        assert_eq!(matches[0].end, 25);
+    }
+
+    #[test]
+    fn test_process_payload_extended_scope_and_sequential() {
+        let mut payload = serde_json::json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "name": "John Doe 123-45-6789",
+                    "content": "My phone is 123-456-7890",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "do_work",
+                                "arguments": "{\"secret_cc\":\"1234-5678-9012-3456\"}"
+                            }
+                        }
+                    ]
+                },
+                {
+                    "role": "assistant",
+                    "content": "Same phone: 123-456-7890 and name John Doe 123-45-6789"
+                }
+            ]
+        });
+
+        process_completions_payload(&mut payload).unwrap();
+
+        let msg1 = &payload["messages"][0];
+        assert_eq!(msg1["name"], "John Doe [REDACTED_SSN_1]");
+        assert_eq!(msg1["content"], "My phone is [REDACTED_PHONE_1]");
+        assert!(msg1["tool_calls"][0]["function"]["arguments"].as_str().unwrap().contains("[REDACTED_CC_1]"));
+
+        let msg2 = &payload["messages"][1];
+        // Sequential request-level cache validation: phone and name get same tokens!
+        assert_eq!(msg2["content"], "Same phone: [REDACTED_PHONE_1] and name John Doe [REDACTED_SSN_1]");
     }
 }
 

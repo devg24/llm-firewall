@@ -17,4 +17,6 @@ candle-core = "0.10.2"
 candle-nn = "0.10.2"
 candle-transformers = "0.10.2"
 regex = "1.12.4"
+url = "2.5.8"
+form_urlencoded = "1.2.2"
 

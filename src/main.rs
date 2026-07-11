@@ -451,7 +451,7 @@ mod tests {
         let response = client
             .post(format!("http://{}/v1/chat/completions", proxy_addr))
             .header("Authorization", "Bearer test-api-key")
-            .body("{\"messages\": [{\"role\": \"user\", \"content\": \"hello user\"}]}")
+            .body("{\"messages\": [{\"role\": \"user\", \"content\": \"hello, my SSN is 123-45-6789 and my email is test@example.com\"}]}")
             .send()
             .await
             .unwrap();
@@ -460,7 +460,7 @@ mod tests {
         let body: serde_json::Value = response.json().await.unwrap();
         let content = body["choices"][0]["message"]["content"].as_str().unwrap();
         assert!(content.contains("Echo:"));
-        assert!(content.contains("\"content\":\"[REDACTED_DUMMY]\""));
+        assert!(content.contains("\"content\":\"hello, my SSN is [REDACTED_SSN_1] and my email is [REDACTED_EMAIL_1]\""));
 
         let _ = tx_proxy.send(());
         let _ = tx_upstream.send(());
@@ -539,7 +539,7 @@ mod tests {
                     "content": [
                         {
                             "type": "text",
-                            "text": "Identify what is in this image"
+                            "text": "Identify what is in this image. Contact info: 123-456-7890"
                         },
                         {
                             "type": "image_url",
@@ -564,7 +564,7 @@ mod tests {
         let response_json: serde_json::Value = response.json().await.unwrap();
         let echoed_content = response_json["choices"][0]["message"]["content"].as_str().unwrap();
         
-        // Verify echoed_content contains the modified body with "[REDACTED_DUMMY]" and preserves other values
+        // Verify echoed_content contains the modified body with "[REDACTED_PHONE_1]" and preserves other values
         let sent_to_upstream: serde_json::Value = serde_json::from_str(
             echoed_content.strip_prefix("Echo: ").unwrap()
         ).unwrap();
@@ -574,7 +574,7 @@ mod tests {
         
         let msg_content = &sent_to_upstream["messages"][0]["content"];
         assert_eq!(msg_content[0]["type"], "text");
-        assert_eq!(msg_content[0]["text"], "[REDACTED_DUMMY]");
+        assert_eq!(msg_content[0]["text"], "Identify what is in this image. Contact info: [REDACTED_PHONE_1]");
         assert_eq!(msg_content[1]["type"], "image_url");
         assert_eq!(msg_content[1]["image_url"]["url"], "https://example.com/image.png");
 
