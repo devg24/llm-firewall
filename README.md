@@ -34,7 +34,7 @@ graph TD
     MLFilter -->|4. Map Offsets| Redactor["Co-Reference Redactor"]
     Redactor -->|5. Rebuild JSON| Forwarder["Upstream Forwarder (Pooled reqwest::Client)"]
     Forwarder -->|HTTP POST| Upstream["Upstream LLM API (UPSTREAM_URL)"]
-    Proxy -.->|Other Endpoints: Transparent Pass-Through {*path}| Forwarder
+    Proxy -.->|"Other Endpoints: Transparent Pass-Through {*path}"| Forwarder
 ```
 
 ### Invariants
