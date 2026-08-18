@@ -115,8 +115,10 @@ pub async fn proxy_handler(
             );
             let proxy_err = if e.is_timeout() {
                 ProxyError::Timeout(e.to_string())
-            } else {
+            } else if e.is_connect() || e.is_builder() || e.is_request() {
                 ProxyError::Upstream(e.to_string())
+            } else {
+                ProxyError::Internal(e.to_string())
             };
             return proxy_err.into_response();
         }
@@ -387,8 +389,10 @@ pub async fn chat_completions_handler(
     let response = req_builder.send().await.map_err(|e| {
         if e.is_timeout() {
             ProxyError::Timeout(e.to_string())
-        } else {
+        } else if e.is_connect() || e.is_builder() || e.is_request() {
             ProxyError::Upstream(e.to_string())
+        } else {
+            ProxyError::Internal(e.to_string())
         }
     })?;
 

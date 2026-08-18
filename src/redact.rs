@@ -8,22 +8,25 @@ pub fn process_completions_payload(payload: &mut serde_json::Value) -> Result<()
 
     for message in messages {
         if let Some(content) = message.get_mut("content") {
-            mutate_content_field(content, &mut state);
+            mutate_content_field(content, &mut state, 0);
         }
         if let Some(name) = message.get_mut("name") {
-            mutate_content_field(name, &mut state);
+            mutate_content_field(name, &mut state, 0);
         }
         if let Some(tool_calls) = message.get_mut("tool_calls") {
-            mutate_content_field(tool_calls, &mut state);
+            mutate_content_field(tool_calls, &mut state, 0);
         }
         if let Some(function_call) = message.get_mut("function_call") {
-            mutate_content_field(function_call, &mut state);
+            mutate_content_field(function_call, &mut state, 0);
         }
     }
     Ok(())
 }
 
-fn mutate_content_field(content: &mut serde_json::Value, state: &mut RedactionState) {
+fn mutate_content_field(content: &mut serde_json::Value, state: &mut RedactionState, depth: usize) {
+    if depth > 100 {
+        return;
+    }
     match content {
         serde_json::Value::String(s) => {
             let normalized = normalize_text(s);
@@ -33,7 +36,7 @@ fn mutate_content_field(content: &mut serde_json::Value, state: &mut RedactionSt
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                mutate_content_field(item, state);
+                mutate_content_field(item, state, depth + 1);
             }
         }
         serde_json::Value::Object(obj) => {
@@ -48,7 +51,7 @@ fn mutate_content_field(content: &mut serde_json::Value, state: &mut RedactionSt
                     if key == "text" && val.is_string() {
                         continue;
                     }
-                    mutate_content_field(val, state);
+                    mutate_content_field(val, state, depth + 1);
                 }
             }
         }
@@ -65,6 +68,10 @@ static EMAIL_REGEX: OnceLock<Regex> = OnceLock::new();
 static PHONE_REGEX: OnceLock<Regex> = OnceLock::new();
 static IP_REGEX: OnceLock<Regex> = OnceLock::new();
 static IPV6_REGEX: OnceLock<Regex> = OnceLock::new();
+static AWS_REGEX: OnceLock<Regex> = OnceLock::new();
+static GCP_REGEX: OnceLock<Regex> = OnceLock::new();
+static GITHUB_REGEX: OnceLock<Regex> = OnceLock::new();
+static BEARER_REGEX: OnceLock<Regex> = OnceLock::new();
 
 const SSN_PATTERN: &str = r"\b\d{3}-\d{2}-\d{4}\b";
 const CC_PATTERN: &str = r"\b(?:\d[ -]*?){13,19}\b";
@@ -72,6 +79,10 @@ const EMAIL_PATTERN: &str = r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b
 const PHONE_PATTERN: &str = r"\b(?:\+?\d{1,3}[- .]?)?\(?\d{3}\)?[- .]?\d{3}[- .]?\d{4}\b";
 const IP_PATTERN: &str = r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b";
 const IPV6_PATTERN: &str = r"(?i)\b(?:[0-9a-fA-F]{1,4}:){3,7}[0-9a-fA-F]{1,4}\b|(?:\b(?:[0-9a-fA-F]{1,4}:){1,6})?::(?:[0-9a-fA-F]{1,4}\b)?|::[0-9a-fA-F]{1,4}\b";
+const AWS_PATTERN: &str = r"(?i)\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[A-Z0-9]{16}\b";
+const GCP_PATTERN: &str = r"(?i)\bAIza[0-9A-Za-z-_]{35}\b";
+const GITHUB_PATTERN: &str = r"(?i)\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36}\b";
+const BEARER_PATTERN: &str = r"(?i)\bbearer\s+[A-Za-z0-9\-\._~\+\/]+=*\b";
 
 pub fn init_regexes() {
     let _ = SSN_REGEX.get_or_init(|| Regex::new(SSN_PATTERN).unwrap());
@@ -80,6 +91,10 @@ pub fn init_regexes() {
     let _ = PHONE_REGEX.get_or_init(|| Regex::new(PHONE_PATTERN).unwrap());
     let _ = IP_REGEX.get_or_init(|| Regex::new(IP_PATTERN).unwrap());
     let _ = IPV6_REGEX.get_or_init(|| Regex::new(IPV6_PATTERN).unwrap());
+    let _ = AWS_REGEX.get_or_init(|| Regex::new(AWS_PATTERN).unwrap());
+    let _ = GCP_REGEX.get_or_init(|| Regex::new(GCP_PATTERN).unwrap());
+    let _ = GITHUB_REGEX.get_or_init(|| Regex::new(GITHUB_PATTERN).unwrap());
+    let _ = BEARER_REGEX.get_or_init(|| Regex::new(BEARER_PATTERN).unwrap());
 }
 
 #[allow(dead_code)]
@@ -112,6 +127,26 @@ pub fn ipv6_regex() -> &'static Regex {
     IPV6_REGEX.get_or_init(|| Regex::new(IPV6_PATTERN).unwrap())
 }
 
+#[allow(dead_code)]
+pub fn aws_regex() -> &'static Regex {
+    AWS_REGEX.get_or_init(|| Regex::new(AWS_PATTERN).unwrap())
+}
+
+#[allow(dead_code)]
+pub fn gcp_regex() -> &'static Regex {
+    GCP_REGEX.get_or_init(|| Regex::new(GCP_PATTERN).unwrap())
+}
+
+#[allow(dead_code)]
+pub fn github_regex() -> &'static Regex {
+    GITHUB_REGEX.get_or_init(|| Regex::new(GITHUB_PATTERN).unwrap())
+}
+
+#[allow(dead_code)]
+pub fn bearer_regex() -> &'static Regex {
+    BEARER_REGEX.get_or_init(|| Regex::new(BEARER_PATTERN).unwrap())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PiiType {
     Ssn,
@@ -119,6 +154,10 @@ pub enum PiiType {
     Email,
     Phone,
     Ip,
+    Aws,
+    Gcp,
+    Github,
+    Bearer,
 }
 
 impl PiiType {
@@ -129,6 +168,10 @@ impl PiiType {
             PiiType::Email => "EMAIL",
             PiiType::Phone => "PHONE",
             PiiType::Ip => "IP",
+            PiiType::Aws => "AWS",
+            PiiType::Gcp => "GCP",
+            PiiType::Github => "GITHUB",
+            PiiType::Bearer => "BEARER",
         }
     }
 }
@@ -212,6 +255,42 @@ pub fn collect_regex_matches(text: &str) -> Vec<PiiMatch> {
             start: mat.start(),
             end: mat.end(),
             pii_type: PiiType::Ip,
+            value: mat.as_str().to_string(),
+        });
+    }
+    // 7. AWS
+    for mat in aws_regex().find_iter(text) {
+        matches.push(PiiMatch {
+            start: mat.start(),
+            end: mat.end(),
+            pii_type: PiiType::Aws,
+            value: mat.as_str().to_string(),
+        });
+    }
+    // 8. GCP
+    for mat in gcp_regex().find_iter(text) {
+        matches.push(PiiMatch {
+            start: mat.start(),
+            end: mat.end(),
+            pii_type: PiiType::Gcp,
+            value: mat.as_str().to_string(),
+        });
+    }
+    // 9. GitHub
+    for mat in github_regex().find_iter(text) {
+        matches.push(PiiMatch {
+            start: mat.start(),
+            end: mat.end(),
+            pii_type: PiiType::Github,
+            value: mat.as_str().to_string(),
+        });
+    }
+    // 10. Bearer
+    for mat in bearer_regex().find_iter(text) {
+        matches.push(PiiMatch {
+            start: mat.start(),
+            end: mat.end(),
+            pii_type: PiiType::Bearer,
             value: mat.as_str().to_string(),
         });
     }
