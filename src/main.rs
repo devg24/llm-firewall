@@ -4,11 +4,13 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 mod proxy;
 mod redact;
+mod ml;
 
 #[derive(Clone)]
 pub struct AppState {
     pub client: reqwest::Client,
     pub upstream_url: reqwest::Url,
+    pub model: Option<std::sync::Arc<ml::SharedModel>>,
 }
 
 fn init_logging() {
@@ -117,9 +119,25 @@ async fn main() {
             std::process::exit(1);
         });
 
+    let mut model_dir = std::env::var("MODEL_DIR").unwrap_or_default().trim().to_string();
+    if model_dir.is_empty() {
+        model_dir = "./model".to_string();
+    }
+    let shared_model = match ml::SharedModel::load_from_dir(std::path::Path::new(&model_dir)) {
+        Ok(m) => {
+            tracing::info!("Successfully loaded BERT model from {}", model_dir);
+            Some(std::sync::Arc::new(m))
+        }
+        Err(e) => {
+            tracing::error!("Fatal: Failed to load ML model from {}: {}", model_dir, e);
+            std::process::exit(1);
+        }
+    };
+
     let state = AppState {
         client,
         upstream_url,
+        model: shared_model,
     };
     
     let app = create_app(state);
@@ -204,7 +222,7 @@ mod tests {
     async fn test_health_endpoint() {
         let client = reqwest::Client::new();
         let upstream_url = reqwest::Url::parse("https://api.openai.com").unwrap();
-        let state = AppState { client, upstream_url };
+        let state = AppState { client, upstream_url, model: None };
         
         let app = create_app(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -299,7 +317,7 @@ mod tests {
             .unwrap();
         // Set a path prefix and upstream query parameter in the upstream URL
         let upstream_url = reqwest::Url::parse(&format!("http://{}/api/v2?up=yes", upstream_addr)).unwrap();
-        let state = AppState { client, upstream_url };
+        let state = AppState { client, upstream_url, model: None };
         
         let proxy_app = create_app(state);
         let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -431,7 +449,7 @@ mod tests {
             .build()
             .unwrap();
         let upstream_url = reqwest::Url::parse(&format!("http://{}", upstream_addr)).unwrap();
-        let state = AppState { client, upstream_url };
+        let state = AppState { client, upstream_url, model: None };
         let proxy_app = create_app(state);
         let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
@@ -514,7 +532,7 @@ mod tests {
             .build()
             .unwrap();
         let upstream_url = reqwest::Url::parse(&format!("http://{}", upstream_addr)).unwrap();
-        let state = AppState { client, upstream_url };
+        let state = AppState { client, upstream_url, model: None };
         let proxy_app = create_app(state);
         let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
@@ -592,7 +610,7 @@ mod tests {
             .build()
             .unwrap();
         let upstream_url = reqwest::Url::parse("https://api.openai.com").unwrap();
-        let state = AppState { client, upstream_url };
+        let state = AppState { client, upstream_url, model: None };
         let proxy_app = create_app(state);
         let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
@@ -631,7 +649,7 @@ mod tests {
             .build()
             .unwrap();
         let upstream_url = reqwest::Url::parse("http://127.0.0.1:1").unwrap();
-        let state = AppState { client, upstream_url };
+        let state = AppState { client, upstream_url, model: None };
         let proxy_app = create_app(state);
         let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy_addr = proxy_listener.local_addr().unwrap();
