@@ -184,9 +184,11 @@ pub struct PiiMatch {
     pub value: String,
 }
 
+use unicode_normalization::UnicodeNormalization;
+
 pub fn normalize_text(text: &str) -> String {
     let mut normalized = String::with_capacity(text.len());
-    for c in text.chars() {
+    for c in text.nfc() {
         if c == '\u{200B}' || c == '\u{200C}' || c == '\u{200D}' {
             continue;
         }

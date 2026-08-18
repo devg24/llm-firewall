@@ -260,11 +260,19 @@ pub enum ProxyError {
     PayloadTooLarge,
     BadRequest(String),
     Internal(String),
+    TooManyRequests,
 }
 
 impl IntoResponse for ProxyError {
     fn into_response(self) -> Response {
         match self {
+            ProxyError::TooManyRequests => (
+                StatusCode::TOO_MANY_REQUESTS,
+                axum::Json(serde_json::json!({
+                    "error": "Too Many Requests"
+                })),
+            )
+                .into_response(),
             ProxyError::PayloadTooLarge => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 axum::Json(serde_json::json!({

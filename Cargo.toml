@@ -20,4 +20,5 @@ regex = "1.12.4"
 url = "2.5.8"
 form_urlencoded = "1.2.2"
 tokenizers = "0.22.2"
+unicode-normalization = "0.1.25"
 

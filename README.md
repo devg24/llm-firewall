@@ -104,6 +104,29 @@ The test suite covers endpoints validation, port and upstream URL parsing logic,
 cargo test
 ```
 
+### 🚀 Demo
+
+To see Guardian-AI's redaction in action locally:
+
+1. Make sure you have downloaded the ML model assets and started the server (`cargo run --release`).
+2. Open a new terminal and send a test request containing PII (like a phone number and email):
+
+```bash
+curl -X POST http://localhost:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_OPENAI_API_KEY" \
+  -d '{
+    "model": "gpt-3.5-turbo",
+    "messages": [
+      {
+        "role": "user",
+        "content": "My name is John Doe and my phone number is 555-123-4567. My email is john.doe@example.com."
+      }
+    ]
+  }'
+```
+*(Note: If you omit a valid API key, the proxy will still successfully intercept and redact the PII locally before OpenAI returns a `401 Unauthorized`. You can observe the successful redaction in the proxy terminal logs!)*
+
 ---
 
 ## 🔒 Security Policy
