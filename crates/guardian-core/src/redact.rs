@@ -1,8 +1,14 @@
-pub fn process_completions_payload(payload: &mut serde_json::Value) -> Result<(), String> {
+use crate::error::CoreError;
+use regex::Regex;
+use std::collections::HashMap;
+use std::sync::OnceLock;
+use unicode_normalization::UnicodeNormalization;
+
+pub fn process_completions_payload(payload: &mut serde_json::Value) -> Result<(), CoreError> {
     let messages = payload
         .get_mut("messages")
         .and_then(|m| m.as_array_mut())
-        .ok_or_else(|| "Missing or invalid 'messages' array".to_string())?;
+        .ok_or_else(|| CoreError::PayloadValidation("Missing or invalid 'messages' array".to_string()))?;
 
     let mut state = RedactionState::new();
 
@@ -23,7 +29,7 @@ pub fn process_completions_payload(payload: &mut serde_json::Value) -> Result<()
     Ok(())
 }
 
-fn mutate_content_field(content: &mut serde_json::Value, state: &mut RedactionState, depth: usize) {
+pub fn mutate_content_field(content: &mut serde_json::Value, state: &mut RedactionState, depth: usize) {
     if depth > 100 {
         return;
     }
@@ -58,9 +64,6 @@ fn mutate_content_field(content: &mut serde_json::Value, state: &mut RedactionSt
         _ => {}
     }
 }
-
-use regex::Regex;
-use std::sync::OnceLock;
 
 static SSN_REGEX: OnceLock<Regex> = OnceLock::new();
 static CC_REGEX: OnceLock<Regex> = OnceLock::new();
@@ -97,52 +100,42 @@ pub fn init_regexes() {
     let _ = BEARER_REGEX.get_or_init(|| Regex::new(BEARER_PATTERN).unwrap());
 }
 
-#[allow(dead_code)]
 pub fn ssn_regex() -> &'static Regex {
     SSN_REGEX.get_or_init(|| Regex::new(SSN_PATTERN).unwrap())
 }
 
-#[allow(dead_code)]
 pub fn cc_regex() -> &'static Regex {
     CC_REGEX.get_or_init(|| Regex::new(CC_PATTERN).unwrap())
 }
 
-#[allow(dead_code)]
 pub fn email_regex() -> &'static Regex {
     EMAIL_REGEX.get_or_init(|| Regex::new(EMAIL_PATTERN).unwrap())
 }
 
-#[allow(dead_code)]
 pub fn phone_regex() -> &'static Regex {
     PHONE_REGEX.get_or_init(|| Regex::new(PHONE_PATTERN).unwrap())
 }
 
-#[allow(dead_code)]
 pub fn ip_regex() -> &'static Regex {
     IP_REGEX.get_or_init(|| Regex::new(IP_PATTERN).unwrap())
 }
 
-#[allow(dead_code)]
 pub fn ipv6_regex() -> &'static Regex {
     IPV6_REGEX.get_or_init(|| Regex::new(IPV6_PATTERN).unwrap())
 }
 
-#[allow(dead_code)]
 pub fn aws_regex() -> &'static Regex {
     AWS_REGEX.get_or_init(|| Regex::new(AWS_PATTERN).unwrap())
 }
 
-#[allow(dead_code)]
 pub fn gcp_regex() -> &'static Regex {
     GCP_REGEX.get_or_init(|| Regex::new(GCP_PATTERN).unwrap())
 }
 
-#[allow(dead_code)]
 pub fn github_regex() -> &'static Regex {
     GITHUB_REGEX.get_or_init(|| Regex::new(GITHUB_PATTERN).unwrap())
 }
 
-#[allow(dead_code)]
 pub fn bearer_regex() -> &'static Regex {
     BEARER_REGEX.get_or_init(|| Regex::new(BEARER_PATTERN).unwrap())
 }
@@ -176,15 +169,13 @@ impl PiiType {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PiiMatch {
     pub start: usize,
     pub end: usize,
     pub pii_type: PiiType,
     pub value: String,
 }
-
-use unicode_normalization::UnicodeNormalization;
 
 pub fn normalize_text(text: &str) -> String {
     let mut normalized = String::with_capacity(text.len());
@@ -321,11 +312,15 @@ pub fn resolve_overlaps(matches: &mut Vec<PiiMatch>) {
     *matches = resolved;
 }
 
-use std::collections::HashMap;
-
 pub struct RedactionState {
     pub map: HashMap<(String, PiiType), String>,
     pub counters: HashMap<PiiType, usize>,
+}
+
+impl Default for RedactionState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RedactionState {
@@ -565,4 +560,3 @@ mod tests {
         assert_eq!(msg2["content"], "Same phone: [REDACTED_PHONE_1] and name John Doe [REDACTED_SSN_1]");
     }
 }
-

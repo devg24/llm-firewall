@@ -1,0 +1,22 @@
+[package]
+name = "guardian-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85.0"
+description = "Core detection, redaction, co-reference state, and ML inference engine for LLM Firewall"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+candle-core = "0.10.2"
+candle-nn = "0.10.2"
+candle-transformers = "0.10.2"
+regex = "1.12.4"
+tokenizers = "0.22.2"
+unicode-normalization = "0.1.25"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.52.3", features = ["sync", "time", "rt", "macros", "rt-multi-thread"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread"] }

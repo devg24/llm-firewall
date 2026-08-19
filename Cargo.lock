@@ -821,6 +821,53 @@ dependencies = [
 ]
 
 [[package]]
+name = "guardian-cli"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "guardian-core",
+ "guardian-proxy",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "guardian-core"
+version = "0.1.0"
+dependencies = [
+ "candle-core",
+ "candle-nn",
+ "candle-transformers",
+ "regex",
+ "serde",
+ "serde_json",
+ "tokenizers",
+ "tokio",
+ "tracing",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "guardian-proxy"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "form_urlencoded",
+ "futures-core",
+ "guardian-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1249,6 +1296,9 @@ dependencies = [
  "candle-transformers",
  "form_urlencoded",
  "futures-core",
+ "guardian-cli",
+ "guardian-core",
+ "guardian-proxy",
  "regex",
  "reqwest",
  "serde",

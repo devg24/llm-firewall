@@ -4,7 +4,19 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85.0"
 
+[workspace]
+members = [
+    ".",
+    "crates/guardian-core",
+    "crates/guardian-proxy",
+    "crates/guardian-cli",
+]
+resolver = "2"
+
 [dependencies]
+guardian-core = { path = "crates/guardian-core" }
+guardian-proxy = { path = "crates/guardian-proxy" }
+guardian-cli = { path = "crates/guardian-cli" }
 axum = "0.8.9"
 tokio = { version = "1.52.3", features = ["full"] }
 tracing = "0.1"
@@ -22,3 +34,32 @@ form_urlencoded = "1.2.2"
 tokenizers = "0.22.2"
 unicode-normalization = "0.1.25"
 
+[profile.dev.package."*"]
+opt-level = 3
+[profile.dev.package.candle-core]
+opt-level = 3
+[profile.dev.package.candle-nn]
+opt-level = 3
+[profile.dev.package.candle-transformers]
+opt-level = 3
+[profile.dev.package.guardian-core]
+opt-level = 3
+[profile.dev.package.guardian-proxy]
+opt-level = 3
+[profile.dev.package.guardian-cli]
+opt-level = 3
+
+[profile.test.package."*"]
+opt-level = 3
+[profile.test.package.candle-core]
+opt-level = 3
+[profile.test.package.candle-nn]
+opt-level = 3
+[profile.test.package.candle-transformers]
+opt-level = 3
+[profile.test.package.guardian-core]
+opt-level = 3
+[profile.test.package.guardian-proxy]
+opt-level = 3
+[profile.test.package.guardian-cli]
+opt-level = 3

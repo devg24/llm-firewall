@@ -1,11 +1,12 @@
-use std::path::Path;
+use crate::error::CoreError;
 use candle_core::Device;
+use candle_nn::Module;
 use candle_transformers::models::bert::{BertModel, Config};
+use std::path::Path;
+use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tokio::sync::Semaphore;
-use crate::proxy::ProxyError;
-use std::sync::Arc;
-use candle_nn::Module;
+
 pub struct SharedModel {
     pub model: BertModel,
     pub classifier: candle_nn::Linear,
@@ -16,19 +17,19 @@ pub struct SharedModel {
 }
 
 impl SharedModel {
-    pub fn load_from_dir(model_dir: &Path) -> Result<Self, String> {
+    pub fn load_from_dir(model_dir: &Path) -> Result<Self, CoreError> {
         let config_path = model_dir.join("config.json");
         let tokenizer_path = model_dir.join("tokenizer.json");
         let safetensors_path = model_dir.join("model.safetensors");
 
         // 1. Load Config
         let config_file = std::fs::File::open(&config_path)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CoreError::ModelLoad(e.to_string()))?;
         let config_json: serde_json::Value = serde_json::from_reader(config_file)
-            .map_err(|e| e.to_string())?;
-        
+            .map_err(|e| CoreError::ModelLoad(e.to_string()))?;
+
         let config: Config = serde_json::from_value(config_json.clone())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CoreError::ModelLoad(e.to_string()))?;
 
         let mut id2label = std::collections::HashMap::new();
         if let Some(map) = config_json.get("id2label").and_then(|v| v.as_object()) {
@@ -48,7 +49,7 @@ impl SharedModel {
 
         // 2. Load Tokenizer
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CoreError::ModelLoad(e.to_string()))?;
 
         // 3. Load Weights (VarBuilder)
         let device = Device::Cpu;
@@ -56,26 +57,24 @@ impl SharedModel {
         let var_builder = match unsafe { candle_nn::VarBuilder::from_mmaped_safetensors(&[&safetensors_path], candle_core::DType::F32, &device) } {
             Ok(vb) => vb,
             Err(_) => {
-                let data = std::fs::read(&safetensors_path).map_err(|e| e.to_string())?;
+                let data = std::fs::read(&safetensors_path).map_err(|e| CoreError::ModelLoad(e.to_string()))?;
                 candle_nn::VarBuilder::from_buffered_safetensors(data, candle_core::DType::F32, &device)
-                    .map_err(|e| e.to_string())?
+                    .map_err(|e| CoreError::ModelLoad(e.to_string()))?
             }
         };
 
         // 4. Construct Model
         let model = BertModel::load(var_builder.clone(), &config)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| CoreError::ModelLoad(e.to_string()))?;
 
         let num_labels = id2label.len();
-        let classifier_weight = var_builder.get((num_labels, config.hidden_size), "classifier.weight").map_err(|e| e.to_string())?;
-        let classifier_bias = var_builder.get(num_labels, "classifier.bias").map_err(|e| e.to_string())?;
+        let classifier_weight = var_builder.get((num_labels, config.hidden_size), "classifier.weight").map_err(|e| CoreError::ModelLoad(e.to_string()))?;
+        let classifier_bias = var_builder.get(num_labels, "classifier.bias").map_err(|e| CoreError::ModelLoad(e.to_string()))?;
         let classifier = candle_nn::Linear::new(classifier_weight, Some(classifier_bias));
 
         Ok(Self { model, classifier, tokenizer, id2label, inference_semaphore, device })
     }
 }
-
-
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TokenClassification {
@@ -87,24 +86,24 @@ pub struct TokenClassification {
 }
 
 #[tracing::instrument(skip(model, text))]
-pub async fn run_inference(model: Arc<SharedModel>, text: String) -> Result<Vec<TokenClassification>, ProxyError> {
+pub async fn run_inference(model: Arc<SharedModel>, text: String) -> Result<Vec<TokenClassification>, CoreError> {
     if text.len() > 100_000 {
-        return Err(ProxyError::Internal("Text too long".to_string()));
+        return Err(CoreError::Internal("Text too long".to_string()));
     }
     let permit = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         model.inference_semaphore.clone().acquire_owned()
     )
     .await
-    .map_err(|_| ProxyError::TooManyRequests)?
-    .map_err(|_| ProxyError::Internal("Semaphore closed".to_string()))?;
+    .map_err(|_| CoreError::TooManyRequests)?
+    .map_err(|_| CoreError::Internal("Semaphore closed".to_string()))?;
     
-    let result = tokio::time::timeout(std::time::Duration::from_secs(120), tokio::task::spawn_blocking(move || {
+    let result = tokio::time::timeout(std::time::Duration::from_secs(120), tokio::task::spawn_blocking(move || -> Result<Vec<TokenClassification>, CoreError> {
         let _permit = permit;
 
         // Tokenize raw text without special tokens to get content tokens & offsets
         let encoding = model.tokenizer.encode(text.clone(), false)
-            .map_err(|e| ProxyError::Internal(format!("Tokenization error: {}", e)))?;
+            .map_err(|e| CoreError::Tokenization(format!("Tokenization error: {}", e)))?;
         
         let raw_tokens = encoding.get_ids();
         let offsets = encoding.get_offsets();
@@ -132,33 +131,33 @@ pub async fn run_inference(model: Arc<SharedModel>, text: String) -> Result<Vec<
             sequence_tokens.push(sep_id);
 
             let input_tensor = candle_core::Tensor::new(&sequence_tokens[..], &model.device)
-                .map_err(|e| ProxyError::Internal(e.to_string()))?
+                .map_err(|e| CoreError::Internal(e.to_string()))?
                 .unsqueeze(0) // Batch size 1
-                .map_err(|e| ProxyError::Internal(e.to_string()))?;
+                .map_err(|e| CoreError::Internal(e.to_string()))?;
 
             // Forward pass
-            let token_type_ids = input_tensor.zeros_like().map_err(|e| ProxyError::Internal(e.to_string()))?;
+            let token_type_ids = input_tensor.zeros_like().map_err(|e| CoreError::Internal(e.to_string()))?;
             let embeddings = model.model.forward(&input_tensor, &token_type_ids, None)
-                .map_err(|e| ProxyError::Internal(e.to_string()))?;
+                .map_err(|e| CoreError::Internal(e.to_string()))?;
 
             // Apply classifier
             let logits = model.classifier.forward(&embeddings)
-                .map_err(|e| ProxyError::Internal(e.to_string()))?;
+                .map_err(|e| CoreError::Internal(e.to_string()))?;
 
             // Compute softmax probabilities
             let probabilities = candle_nn::ops::softmax(&logits, candle_core::D::Minus1)
-                .map_err(|e| ProxyError::Internal(e.to_string()))?
+                .map_err(|e| CoreError::Internal(e.to_string()))?
                 .squeeze(0)
-                .map_err(|e| ProxyError::Internal(e.to_string()))?;
-            let prob_vec = probabilities.to_vec2::<f32>().map_err(|e| ProxyError::Internal(e.to_string()))?;
+                .map_err(|e| CoreError::Internal(e.to_string()))?;
+            let prob_vec = probabilities.to_vec2::<f32>().map_err(|e| CoreError::Internal(e.to_string()))?;
 
             // Extract argmax predictions
             let predictions = logits.argmax(candle_core::D::Minus1)
-                .map_err(|e| ProxyError::Internal(e.to_string()))?
+                .map_err(|e| CoreError::Internal(e.to_string()))?
                 .squeeze(0)
-                .map_err(|e| ProxyError::Internal(e.to_string()))?
+                .map_err(|e| CoreError::Internal(e.to_string()))?
                 .to_vec1::<u32>()
-                .map_err(|e| ProxyError::Internal(e.to_string()))?;
+                .map_err(|e| CoreError::Internal(e.to_string()))?;
 
             // Content tokens correspond to indices 1..=chunk_raw_tokens.len()
             for (i, &pred) in predictions[1..=chunk_raw_tokens.len()].iter().enumerate() {
@@ -194,7 +193,10 @@ pub async fn run_inference(model: Arc<SharedModel>, text: String) -> Result<Vec<
         results.dedup_by(|a, b| a.start == b.start && a.end == b.end && a.entity_group == b.entity_group);
 
         Ok(results)
-    })).await.map_err(|_| ProxyError::Internal("Inference timeout".to_string()))?.map_err(|_| ProxyError::Internal("Inference task panicked".to_string()))??;
+    }))
+    .await
+    .map_err(|_| CoreError::InferenceTimeout)?
+    .map_err(|e| CoreError::TaskPanicked(e.to_string()))??;
 
     Ok(result)
 }
@@ -211,14 +213,16 @@ mod tests {
         assert!(result.is_err());
     }
 
-
-
     #[tokio::test]
     async fn test_run_inference_with_model() {
-        let dir = Path::new("model");
-        if !dir.exists() {
+        let dir = if Path::new("model").exists() {
+            Path::new("model")
+        } else if Path::new("../../model").exists() {
+            Path::new("../../model")
+        } else {
             return;
-        }
+        };
+
         let model = Arc::new(SharedModel::load_from_dir(dir).unwrap());
         
         let text = "My name is John Doe and I work at Google in New York.".to_string();
@@ -241,5 +245,3 @@ mod tests {
         assert!(!long_result.is_empty());
     }
 }
-
-

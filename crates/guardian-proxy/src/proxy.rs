@@ -9,7 +9,7 @@ use std::time::Instant;
 
 pub struct SyncStream<S>(std::sync::Mutex<S>);
 
-unsafe impl<S> Sync for SyncStream<S> {}
+unsafe impl<S: Send> Sync for SyncStream<S> {}
 
 impl<S, T, E> futures_core::Stream for SyncStream<S>
 where
@@ -167,8 +167,10 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
     "keep-alive",
     "proxy-authenticate",
     "proxy-authorization",
+    "proxy-connection",
     "te",
     "trailer",
+    "trailers",
     "transfer-encoding",
     "upgrade",
 ];
@@ -329,6 +331,21 @@ impl IntoResponse for ProxyError {
     }
 }
 
+impl From<guardian_core::CoreError> for ProxyError {
+    fn from(err: guardian_core::CoreError) -> Self {
+        match err {
+            guardian_core::CoreError::TooManyRequests => ProxyError::TooManyRequests,
+            guardian_core::CoreError::InferenceTimeout => ProxyError::Timeout("Inference timeout".to_string()),
+            guardian_core::CoreError::PayloadValidation(msg) => ProxyError::BadRequest(msg),
+            guardian_core::CoreError::ModelLoad(msg)
+            | guardian_core::CoreError::Tokenization(msg)
+            | guardian_core::CoreError::TaskPanicked(msg)
+            | guardian_core::CoreError::Serialization(msg)
+            | guardian_core::CoreError::Internal(msg) => ProxyError::Internal(msg),
+        }
+    }
+}
+
 pub async fn chat_completions_handler(
     State(state): State<AppState>,
     method: Method,
@@ -360,7 +377,7 @@ pub async fn chat_completions_handler(
         .map_err(|e| ProxyError::BadRequest(format!("Invalid JSON payload: {}", e)))?;
 
     // Process/Redact payload recursively
-    crate::redact::process_completions_payload(&mut payload)
+    guardian_core::process_completions_payload(&mut payload)
         .map_err(|e| ProxyError::BadRequest(format!("Payload validation failure: {}", e)))?;
 
     // Rebuild the request body bytes
