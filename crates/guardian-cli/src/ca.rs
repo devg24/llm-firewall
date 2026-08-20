@@ -1,9 +1,9 @@
-use rcgen::{CertificateParams, KeyPair, DistinguishedName};
-use std::process::Command;
-use std::path::{Path, PathBuf};
+use rcgen::{CertificateParams, DistinguishedName, KeyPair};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 pub struct LocalCA {
     pub cert_path: PathBuf,
@@ -24,7 +24,7 @@ impl LocalCA {
 
             let key_pair = KeyPair::generate()?;
             let cert = params.self_signed(&key_pair)?;
-            
+
             let mut cert_file = fs::File::create(&cert_path)?;
             cert_file.write_all(cert.pem().as_bytes())?;
 
@@ -40,12 +40,26 @@ impl LocalCA {
         Ok(Self { cert_path })
     }
 
-    pub fn trust_with_runner<R: CommandRunner>(&self, runner: &R) -> Result<(), Box<dyn std::error::Error>> {
-        let cert_path_str = self.cert_path.to_str().ok_or("Certificate path contains non-UTF8 characters")?;
+    pub fn trust_with_runner<R: CommandRunner>(
+        &self,
+        runner: &R,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cert_path_str = self
+            .cert_path
+            .to_str()
+            .ok_or("Certificate path contains non-UTF8 characters")?;
         if cfg!(target_os = "macos") {
             runner.run(
                 "security",
-                &["add-trusted-cert", "-d", "-r", "trustRoot", "-k", "/Library/Keychains/System.keychain", cert_path_str],
+                &[
+                    "add-trusted-cert",
+                    "-d",
+                    "-r",
+                    "trustRoot",
+                    "-k",
+                    "/Library/Keychains/System.keychain",
+                    cert_path_str,
+                ],
             )?;
         } else {
             return Err("OS not supported for local CA trust".into());
@@ -53,13 +67,16 @@ impl LocalCA {
         Ok(())
     }
 
-    pub fn untrust_with_runner<R: CommandRunner>(&self, runner: &R) -> Result<(), Box<dyn std::error::Error>> {
-        let cert_path_str = self.cert_path.to_str().ok_or("Certificate path contains non-UTF8 characters")?;
+    pub fn untrust_with_runner<R: CommandRunner>(
+        &self,
+        runner: &R,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cert_path_str = self
+            .cert_path
+            .to_str()
+            .ok_or("Certificate path contains non-UTF8 characters")?;
         if cfg!(target_os = "macos") {
-            runner.run(
-                "security",
-                &["remove-trusted-cert", "-d", cert_path_str],
-            )?;
+            runner.run("security", &["remove-trusted-cert", "-d", cert_path_str])?;
         } else {
             return Err("OS not supported for local CA untrust".into());
         }
@@ -83,9 +100,7 @@ pub struct RealCommandRunner;
 
 impl CommandRunner for RealCommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
-        let output = Command::new(program)
-            .args(args)
-            .output()?;
+        let output = Command::new(program).args(args).output()?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("Command {} failed: {}", program, stderr).into());
@@ -113,10 +128,7 @@ mod tests {
         let (_, pem) = x509_parser::pem::parse_x509_pem(&cert_content).unwrap();
         let cert = pem.parse_x509().unwrap();
 
-        assert_eq!(
-            cert.subject().to_string(),
-            "CN=LLM Firewall Local CA"
-        );
+        assert_eq!(cert.subject().to_string(), "CN=LLM Firewall Local CA");
         assert!(cert.is_ca());
     }
 
@@ -153,7 +165,10 @@ mod tests {
     impl CommandRunner for MockRunner {
         fn run(&self, program: &str, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
             let mut guard = self.commands.lock().unwrap();
-            guard.push((program.to_string(), args.iter().map(|s| s.to_string()).collect()));
+            guard.push((
+                program.to_string(),
+                args.iter().map(|s| s.to_string()).collect(),
+            ));
             Ok(())
         }
     }
@@ -182,4 +197,3 @@ mod tests {
         }
     }
 }
-

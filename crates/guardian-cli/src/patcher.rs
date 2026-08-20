@@ -1,6 +1,6 @@
+use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
-use serde_json::Value;
 
 pub struct ConfigPatcher {
     cursor_settings_path: Option<PathBuf>,
@@ -32,7 +32,8 @@ impl ConfigPatcher {
         #[cfg(target_os = "linux")]
         let p = PathBuf::from(&home).join(".config/Cursor/User/settings.json");
         #[cfg(target_os = "windows")]
-        let p = PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("Cursor/User/settings.json");
+        let p = PathBuf::from(std::env::var("APPDATA").unwrap_or_default())
+            .join("Cursor/User/settings.json");
         Some(p)
     }
 
@@ -43,7 +44,8 @@ impl ConfigPatcher {
         #[cfg(target_os = "linux")]
         let p = PathBuf::from(&home).join(".config/Code/User/settings.json");
         #[cfg(target_os = "windows")]
-        let p = PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("Code/User/settings.json");
+        let p = PathBuf::from(std::env::var("APPDATA").unwrap_or_default())
+            .join("Code/User/settings.json");
         Some(p)
     }
 
@@ -77,7 +79,7 @@ impl ConfigPatcher {
                 tracing::debug!("VSCode settings not found at {:?}", path);
             }
         }
-        
+
         println!("\n=======================================================");
         println!("🛡️  LLM Firewall is running on port {}", port);
         println!("=======================================================");
@@ -86,20 +88,24 @@ impl ConfigPatcher {
         println!("  export HTTPS_PROXY=http://127.0.0.1:{}", port);
         println!("  export NODE_TLS_REJECT_UNAUTHORIZED=0");
         println!("=======================================================\n");
-        
+
         Self::detect_ide_processes();
-        
+
         Ok(())
     }
 
     pub fn restore(&self) -> Result<(), String> {
-        if let (Some(path), Some(content)) = (&self.cursor_settings_path, &self.original_cursor_content) {
+        if let (Some(path), Some(content)) =
+            (&self.cursor_settings_path, &self.original_cursor_content)
+        {
             if path.exists() {
                 fs::write(path, content).map_err(|e| e.to_string())?;
                 tracing::info!("Restored Cursor settings at {:?}", path);
             }
         }
-        if let (Some(path), Some(content)) = (&self.vscode_settings_path, &self.original_vscode_content) {
+        if let (Some(path), Some(content)) =
+            (&self.vscode_settings_path, &self.original_vscode_content)
+        {
             if path.exists() {
                 fs::write(path, content).map_err(|e| e.to_string())?;
                 tracing::info!("Restored VSCode settings at {:?}", path);
@@ -111,7 +117,7 @@ impl ConfigPatcher {
     pub fn patch_json_string(content: &str, proxy_url: &str) -> String {
         let lines: Vec<&str> = content.lines().collect();
         let mut new_lines = Vec::new();
-        
+
         // Remove existing proxy settings
         for line in lines {
             if !line.contains("\"http.proxy\"") && !line.contains("\"http.proxyStrictSSL\"") {
@@ -121,10 +127,10 @@ impl ConfigPatcher {
                 // It's a bit complex to handle perfectly with just lines, but we'll try to ensure valid JSON.
             }
         }
-        
+
         let rebuilt = new_lines.join("\n");
         let rb_trimmed = rebuilt.trim_end();
-        
+
         if let Some(stripped) = rb_trimmed.strip_suffix('}') {
             let mut base = stripped.trim_end().to_string();
             if !base.is_empty() && !base.ends_with(',') && !base.ends_with('{') {
@@ -135,27 +141,38 @@ impl ConfigPatcher {
             base.push_str("\",\n  \"http.proxyStrictSSL\": false\n}");
             return base;
         }
-        
+
         if let Ok(mut v) = serde_json::from_str::<Value>(content) {
             if let Some(obj) = v.as_object_mut() {
-                obj.insert("http.proxy".to_string(), Value::String(proxy_url.to_string()));
+                obj.insert(
+                    "http.proxy".to_string(),
+                    Value::String(proxy_url.to_string()),
+                );
                 obj.insert("http.proxyStrictSSL".to_string(), Value::Bool(false));
                 return serde_json::to_string_pretty(&v).unwrap_or(content.to_string());
             }
         }
-        
+
         content.to_string()
     }
 
     pub fn detect_ide_processes() {
         #[cfg(unix)]
         {
-            if let Ok(output) = std::process::Command::new("pgrep").arg("-i").arg("cursor").output() {
+            if let Ok(output) = std::process::Command::new("pgrep")
+                .arg("-i")
+                .arg("cursor")
+                .output()
+            {
                 if !output.stdout.is_empty() {
                     println!("⚠️  Detected running Cursor instance. Please restart Cursor to pick up the new proxy settings.");
                 }
             }
-            if let Ok(output) = std::process::Command::new("pgrep").arg("-i").arg("code").output() {
+            if let Ok(output) = std::process::Command::new("pgrep")
+                .arg("-i")
+                .arg("code")
+                .output()
+            {
                 if !output.stdout.is_empty() {
                     println!("⚠️  Detected running VSCode instance. Please restart VSCode to pick up the new proxy settings.");
                 }
@@ -201,7 +218,8 @@ mod tests {
 
     #[test]
     fn test_patch_json_string_replaces_existing() {
-        let content = "{\n  \"http.proxy\": \"http://old:8080\",\n  \"http.proxyStrictSSL\": true\n}";
+        let content =
+            "{\n  \"http.proxy\": \"http://old:8080\",\n  \"http.proxyStrictSSL\": true\n}";
         let proxy_url = "http://127.0.0.1:3000";
         let patched = ConfigPatcher::patch_json_string(content, proxy_url);
         assert!(!patched.contains("old:8080"));

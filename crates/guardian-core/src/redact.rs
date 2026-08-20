@@ -8,7 +8,9 @@ pub fn process_completions_payload(payload: &mut serde_json::Value) -> Result<()
     let messages = payload
         .get_mut("messages")
         .and_then(|m| m.as_array_mut())
-        .ok_or_else(|| CoreError::PayloadValidation("Missing or invalid 'messages' array".to_string()))?;
+        .ok_or_else(|| {
+            CoreError::PayloadValidation("Missing or invalid 'messages' array".to_string())
+        })?;
 
     let mut state = RedactionState::new();
 
@@ -29,7 +31,11 @@ pub fn process_completions_payload(payload: &mut serde_json::Value) -> Result<()
     Ok(())
 }
 
-pub fn mutate_content_field(content: &mut serde_json::Value, state: &mut RedactionState, depth: usize) {
+pub fn mutate_content_field(
+    content: &mut serde_json::Value,
+    state: &mut RedactionState,
+    depth: usize,
+) {
     if depth > 100 {
         return;
     }
@@ -292,9 +298,7 @@ pub fn collect_regex_matches(text: &str) -> Vec<PiiMatch> {
 }
 
 pub fn resolve_overlaps(matches: &mut Vec<PiiMatch>) {
-    matches.sort_by(|a, b| {
-        a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end))
-    });
+    matches.sort_by(|a, b| a.start.cmp(&b.start).then_with(|| b.end.cmp(&a.end)));
 
     let mut resolved: Vec<PiiMatch> = Vec::with_capacity(matches.len());
 
@@ -373,11 +377,23 @@ mod tests {
     fn test_ssn_regex() {
         let re = ssn_regex();
         // Valid SSNs
-        assert!(re.is_match("000-12-3456"), "Should match valid SSN 000-12-3456");
-        assert!(re.is_match("123-45-6789"), "Should match valid SSN 123-45-6789");
+        assert!(
+            re.is_match("000-12-3456"),
+            "Should match valid SSN 000-12-3456"
+        );
+        assert!(
+            re.is_match("123-45-6789"),
+            "Should match valid SSN 123-45-6789"
+        );
         // Invalid SSNs
-        assert!(!re.is_match("123-45-678"), "Should reject 9-digit without correct grouping");
-        assert!(!re.is_match("12-345-6789"), "Should reject incorrect grouping");
+        assert!(
+            !re.is_match("123-45-678"),
+            "Should reject 9-digit without correct grouping"
+        );
+        assert!(
+            !re.is_match("12-345-6789"),
+            "Should reject incorrect grouping"
+        );
         assert!(!re.is_match("abc-de-fghj"), "Should reject non-digits");
     }
 
@@ -385,11 +401,20 @@ mod tests {
     fn test_cc_regex() {
         let re = cc_regex();
         // Valid CCs
-        assert!(re.is_match("1234-5678-9012-3456"), "Should match Visa/MC format");
+        assert!(
+            re.is_match("1234-5678-9012-3456"),
+            "Should match Visa/MC format"
+        );
         assert!(re.is_match("1234567890123"), "Should match 13-digit card");
-        assert!(re.is_match("1234 5678 9012 3456"), "Should match with spaces");
+        assert!(
+            re.is_match("1234 5678 9012 3456"),
+            "Should match with spaces"
+        );
         // Invalid CCs
-        assert!(!re.is_match("123456789012"), "Should reject fewer than 13 digits");
+        assert!(
+            !re.is_match("123456789012"),
+            "Should reject fewer than 13 digits"
+        );
         assert!(!re.is_match("abc-def-ghi-jkl"), "Should reject non-digits");
     }
 
@@ -398,10 +423,16 @@ mod tests {
         let re = email_regex();
         // Valid Emails
         assert!(re.is_match("test@example.com"), "Should match simple email");
-        assert!(re.is_match("user.name+tag@sub.domain.org"), "Should match complex email");
+        assert!(
+            re.is_match("user.name+tag@sub.domain.org"),
+            "Should match complex email"
+        );
         // Invalid Emails
         assert!(!re.is_match("test@"), "Should reject missing domain");
-        assert!(!re.is_match("@example.com"), "Should reject missing local part");
+        assert!(
+            !re.is_match("@example.com"),
+            "Should reject missing local part"
+        );
         assert!(!re.is_match("test@example"), "Should reject missing TLD");
     }
 
@@ -409,9 +440,18 @@ mod tests {
     fn test_phone_regex() {
         let re = phone_regex();
         // Valid Phones
-        assert!(re.is_match("123-456-7890"), "Should match format 123-456-7890");
-        assert!(re.is_match("+1 123 456 7890"), "Should match with country code");
-        assert!(re.is_match("(123) 456-7890"), "Should match with parentheses");
+        assert!(
+            re.is_match("123-456-7890"),
+            "Should match format 123-456-7890"
+        );
+        assert!(
+            re.is_match("+1 123 456 7890"),
+            "Should match with country code"
+        );
+        assert!(
+            re.is_match("(123) 456-7890"),
+            "Should match with parentheses"
+        );
         assert!(re.is_match("1234567890"), "Should match continuous digits");
         // Invalid Phones
         assert!(!re.is_match("12345"), "Should reject short numbers");
@@ -423,10 +463,19 @@ mod tests {
         // Valid IPs
         assert!(re.is_match("192.168.1.1"), "Should match valid IPv4");
         assert!(re.is_match("10.0.0.1"), "Should match valid IPv4");
-        assert!(re.is_match("255.255.255.255"), "Should match maximum IPv4 address");
+        assert!(
+            re.is_match("255.255.255.255"),
+            "Should match maximum IPv4 address"
+        );
         // Invalid IPs
-        assert!(!re.is_match("999.999.999.999"), "Should reject out-of-range octets");
-        assert!(!re.is_match("256.1.2.3"), "Should reject out-of-range first octet");
+        assert!(
+            !re.is_match("999.999.999.999"),
+            "Should reject out-of-range octets"
+        );
+        assert!(
+            !re.is_match("256.1.2.3"),
+            "Should reject out-of-range first octet"
+        );
     }
 
     #[test]
@@ -439,9 +488,24 @@ mod tests {
     #[test]
     fn test_resolve_overlaps() {
         let mut matches = vec![
-            PiiMatch { start: 10, end: 20, pii_type: PiiType::Cc, value: "1234567890123456".to_string() },
-            PiiMatch { start: 12, end: 18, pii_type: PiiType::Phone, value: "123456".to_string() },
-            PiiMatch { start: 25, end: 35, pii_type: PiiType::Email, value: "a@b.com".to_string() },
+            PiiMatch {
+                start: 10,
+                end: 20,
+                pii_type: PiiType::Cc,
+                value: "1234567890123456".to_string(),
+            },
+            PiiMatch {
+                start: 12,
+                end: 18,
+                pii_type: PiiType::Phone,
+                value: "123456".to_string(),
+            },
+            PiiMatch {
+                start: 25,
+                end: 35,
+                pii_type: PiiType::Email,
+                value: "a@b.com".to_string(),
+            },
         ];
         resolve_overlaps(&mut matches);
         assert_eq!(matches.len(), 2);
@@ -502,7 +566,7 @@ mod tests {
         let tok2 = state.get_or_create_token("123-456-7890", PiiType::Cc);
         assert_eq!(tok1, "[REDACTED_PHONE_1]");
         assert_eq!(tok2, "[REDACTED_CC_1]");
-        
+
         // Case insensitive check
         let tok3 = state.get_or_create_token("TEST@EXAMPLE.COM", PiiType::Email);
         let tok4 = state.get_or_create_token("test@example.com", PiiType::Email);
@@ -513,8 +577,18 @@ mod tests {
     #[test]
     fn test_resolve_overlaps_extended() {
         let mut matches = vec![
-            PiiMatch { start: 10, end: 20, pii_type: PiiType::Ssn, value: "123-45-6789".to_string() },
-            PiiMatch { start: 15, end: 25, pii_type: PiiType::Phone, value: "6789012".to_string() },
+            PiiMatch {
+                start: 10,
+                end: 20,
+                pii_type: PiiType::Ssn,
+                value: "123-45-6789".to_string(),
+            },
+            PiiMatch {
+                start: 15,
+                end: 25,
+                pii_type: PiiType::Phone,
+                value: "6789012".to_string(),
+            },
         ];
         resolve_overlaps(&mut matches);
         assert_eq!(matches.len(), 1);
@@ -553,10 +627,16 @@ mod tests {
         let msg1 = &payload["messages"][0];
         assert_eq!(msg1["name"], "John Doe [REDACTED_SSN_1]");
         assert_eq!(msg1["content"], "My phone is [REDACTED_PHONE_1]");
-        assert!(msg1["tool_calls"][0]["function"]["arguments"].as_str().unwrap().contains("[REDACTED_CC_1]"));
+        assert!(msg1["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap()
+            .contains("[REDACTED_CC_1]"));
 
         let msg2 = &payload["messages"][1];
         // Sequential request-level cache validation: phone and name get same tokens!
-        assert_eq!(msg2["content"], "Same phone: [REDACTED_PHONE_1] and name John Doe [REDACTED_SSN_1]");
+        assert_eq!(
+            msg2["content"],
+            "Same phone: [REDACTED_PHONE_1] and name John Doe [REDACTED_SSN_1]"
+        );
     }
 }

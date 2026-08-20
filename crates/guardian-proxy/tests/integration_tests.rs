@@ -10,7 +10,7 @@ use axum::{
     routing::{any, post},
     Router,
 };
-use guardian_proxy::{AppState, create_app};
+use guardian_proxy::{create_app, AppState};
 
 fn make_test_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -28,12 +28,16 @@ fn make_test_client() -> reqwest::Client {
 async fn test_health_endpoint() {
     let client = make_test_client();
     let upstream_url = reqwest::Url::parse("https://api.openai.com").unwrap();
-    let state = AppState { client, upstream_url, model: None };
-    
+    let state = AppState {
+        client,
+        upstream_url,
+        model: None,
+    };
+
     let app = create_app(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    
+
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let server_handle = tokio::spawn(async move {
         axum::serve(listener, app)
@@ -98,7 +102,7 @@ async fn test_proxy_transparent_fallback() {
 
     let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = upstream_listener.local_addr().unwrap();
-    
+
     let (tx_upstream, rx_upstream) = tokio::sync::oneshot::channel::<()>();
     let upstream_handle = tokio::spawn(async move {
         axum::serve(upstream_listener, upstream_app)
@@ -112,13 +116,18 @@ async fn test_proxy_transparent_fallback() {
     // 2. Spawn proxy server
     let client = make_test_client();
     // Set a path prefix and upstream query parameter in the upstream URL
-    let upstream_url = reqwest::Url::parse(&format!("http://{}/api/v2?up=yes", upstream_addr)).unwrap();
-    let state = AppState { client, upstream_url, model: None };
-    
+    let upstream_url =
+        reqwest::Url::parse(&format!("http://{}/api/v2?up=yes", upstream_addr)).unwrap();
+    let state = AppState {
+        client,
+        upstream_url,
+        model: None,
+    };
+
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = proxy_listener.local_addr().unwrap();
-    
+
     let (tx_proxy, rx_proxy) = tokio::sync::oneshot::channel::<()>();
     let proxy_handle = tokio::spawn(async move {
         axum::serve(proxy_listener, proxy_app)
@@ -147,23 +156,32 @@ async fn test_proxy_transparent_fallback() {
     // 4. Assertions on response
     // Verify response status
     assert_eq!(response.status(), reqwest::StatusCode::OK);
-    
+
     // Verify response headers
-    assert_eq!(response.headers().get("x-upstream-response-header").unwrap(), "custom-val");
-    assert!(response.headers().get("connection").is_none() || response.headers().get("connection").unwrap() != "close");
+    assert_eq!(
+        response
+            .headers()
+            .get("x-upstream-response-header")
+            .unwrap(),
+        "custom-val"
+    );
+    assert!(
+        response.headers().get("connection").is_none()
+            || response.headers().get("connection").unwrap() != "close"
+    );
     assert!(response.headers().get("x-res-hop").is_none());
 
     // Verify body and forwarded headers
     let json_body: serde_json::Value = response.json().await.unwrap();
-    
+
     assert_eq!(json_body["auth_header"], "Bearer test-key");
     assert_eq!(json_body["custom_header"], "my-custom-header");
     assert_eq!(json_body["body"], "hello world request body");
-    
+
     // Verify connection-specified hop header was dropped
     assert!(json_body["another_hop"].is_null());
     assert_ne!(json_body["connection_header"], "keep-alive");
-    
+
     // Verify host header was rewritten to match upstream
     assert_eq!(json_body["host_header"], upstream_addr.to_string());
 
@@ -204,8 +222,7 @@ async fn test_proxy_chat_completions_success() {
     let upstream_app = Router::new().route(
         "/v1/chat/completions",
         post(|headers: axum::http::HeaderMap, body: Bytes| async move {
-            let builder = Response::builder()
-                .status(axum::http::StatusCode::OK);
+            let builder = Response::builder().status(axum::http::StatusCode::OK);
             let body_str = std::str::from_utf8(&body).unwrap_or("").to_string();
             let response_data = serde_json::json!({
                 "id": "chatcmpl-123",
@@ -220,13 +237,22 @@ async fn test_proxy_chat_completions_success() {
                 }]
             });
             assert_eq!(headers.get("authorization").unwrap(), "Bearer test-api-key");
-            assert!(headers.get("host").unwrap().to_str().unwrap().starts_with("127.0.0.1"));
-            builder.body(axum::body::Body::from(serde_json::to_vec(&response_data).unwrap())).unwrap()
-        })
+            assert!(headers
+                .get("host")
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("127.0.0.1"));
+            builder
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&response_data).unwrap(),
+                ))
+                .unwrap()
+        }),
     );
     let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = upstream_listener.local_addr().unwrap();
-    
+
     let (tx_upstream, rx_upstream) = tokio::sync::oneshot::channel::<()>();
     let upstream_handle = tokio::spawn(async move {
         axum::serve(upstream_listener, upstream_app)
@@ -240,11 +266,15 @@ async fn test_proxy_chat_completions_success() {
     // 2. Spawn proxy server
     let client = make_test_client();
     let upstream_url = reqwest::Url::parse(&format!("http://{}", upstream_addr)).unwrap();
-    let state = AppState { client, upstream_url, model: None };
+    let state = AppState {
+        client,
+        upstream_url,
+        model: None,
+    };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = proxy_listener.local_addr().unwrap();
-    
+
     let (tx_proxy, rx_proxy) = tokio::sync::oneshot::channel::<()>();
     let proxy_handle = tokio::spawn(async move {
         axum::serve(proxy_listener, proxy_app)
@@ -269,7 +299,9 @@ async fn test_proxy_chat_completions_success() {
     let body: serde_json::Value = response.json().await.unwrap();
     let content = body["choices"][0]["message"]["content"].as_str().unwrap();
     assert!(content.contains("Echo:"));
-    assert!(content.contains("\"content\":\"hello, my SSN is [REDACTED_SSN_1] and my email is [REDACTED_EMAIL_1]\""));
+    assert!(content.contains(
+        "\"content\":\"hello, my SSN is [REDACTED_SSN_1] and my email is [REDACTED_EMAIL_1]\""
+    ));
 
     let _ = tx_proxy.send(());
     let _ = tx_upstream.send(());
@@ -299,12 +331,16 @@ async fn test_proxy_chat_completions_complex() {
                     "finish_reason": "stop"
                 }]
             });
-            builder.body(axum::body::Body::from(serde_json::to_vec(&response_data).unwrap())).unwrap()
-        })
+            builder
+                .body(axum::body::Body::from(
+                    serde_json::to_vec(&response_data).unwrap(),
+                ))
+                .unwrap()
+        }),
     );
     let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let upstream_addr = upstream_listener.local_addr().unwrap();
-    
+
     let (tx_upstream, rx_upstream) = tokio::sync::oneshot::channel::<()>();
     let upstream_handle = tokio::spawn(async move {
         axum::serve(upstream_listener, upstream_app)
@@ -318,11 +354,15 @@ async fn test_proxy_chat_completions_complex() {
     // 2. Spawn proxy server
     let client = make_test_client();
     let upstream_url = reqwest::Url::parse(&format!("http://{}", upstream_addr)).unwrap();
-    let state = AppState { client, upstream_url, model: None };
+    let state = AppState {
+        client,
+        upstream_url,
+        model: None,
+    };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = proxy_listener.local_addr().unwrap();
-    
+
     let (tx_proxy, rx_proxy) = tokio::sync::oneshot::channel::<()>();
     let proxy_handle = tokio::spawn(async move {
         axum::serve(proxy_listener, proxy_app)
@@ -366,21 +406,28 @@ async fn test_proxy_chat_completions_complex() {
 
     assert_eq!(response.status(), reqwest::StatusCode::OK);
     let response_json: serde_json::Value = response.json().await.unwrap();
-    let echoed_content = response_json["choices"][0]["message"]["content"].as_str().unwrap();
-    
+    let echoed_content = response_json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap();
+
     // Verify echoed_content contains the modified body with "[REDACTED_PHONE_1]" and preserves other values
-    let sent_to_upstream: serde_json::Value = serde_json::from_str(
-        echoed_content.strip_prefix("Echo: ").unwrap()
-    ).unwrap();
+    let sent_to_upstream: serde_json::Value =
+        serde_json::from_str(echoed_content.strip_prefix("Echo: ").unwrap()).unwrap();
 
     assert_eq!(sent_to_upstream["model"], "gpt-4-vision");
     assert_eq!(sent_to_upstream["temperature"], 0.7);
-    
+
     let msg_content = &sent_to_upstream["messages"][0]["content"];
     assert_eq!(msg_content[0]["type"], "text");
-    assert_eq!(msg_content[0]["text"], "Identify what is in this image. Contact info: [REDACTED_PHONE_1]");
+    assert_eq!(
+        msg_content[0]["text"],
+        "Identify what is in this image. Contact info: [REDACTED_PHONE_1]"
+    );
     assert_eq!(msg_content[1]["type"], "image_url");
-    assert_eq!(msg_content[1]["image_url"]["url"], "https://example.com/image.png");
+    assert_eq!(
+        msg_content[1]["image_url"]["url"],
+        "https://example.com/image.png"
+    );
 
     let _ = tx_proxy.send(());
     let _ = tx_upstream.send(());
@@ -392,11 +439,15 @@ async fn test_proxy_chat_completions_complex() {
 async fn test_proxy_chat_completions_too_large() {
     let client = make_test_client();
     let upstream_url = reqwest::Url::parse("https://api.openai.com").unwrap();
-    let state = AppState { client, upstream_url, model: None };
+    let state = AppState {
+        client,
+        upstream_url,
+        model: None,
+    };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = proxy_listener.local_addr().unwrap();
-    
+
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let server_handle = tokio::spawn(async move {
         axum::serve(proxy_listener, proxy_app)
@@ -427,11 +478,15 @@ async fn test_proxy_chat_completions_too_large() {
 async fn test_proxy_chat_completions_fail_closed() {
     let client = make_test_client();
     let upstream_url = reqwest::Url::parse("http://127.0.0.1:1").unwrap();
-    let state = AppState { client, upstream_url, model: None };
+    let state = AppState {
+        client,
+        upstream_url,
+        model: None,
+    };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = proxy_listener.local_addr().unwrap();
-    
+
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
     let server_handle = tokio::spawn(async move {
         axum::serve(proxy_listener, proxy_app)
@@ -451,9 +506,15 @@ async fn test_proxy_chat_completions_fail_closed() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response_malformed.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_malformed.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
     let body_malformed: serde_json::Value = response_malformed.json().await.unwrap();
-    assert!(body_malformed["error"].as_str().unwrap().contains("Invalid JSON payload"));
+    assert!(body_malformed["error"]
+        .as_str()
+        .unwrap()
+        .contains("Invalid JSON payload"));
 
     // 2. Send JSON missing "messages" field
     let response_missing_msg = client
@@ -462,9 +523,15 @@ async fn test_proxy_chat_completions_fail_closed() {
         .send()
         .await
         .unwrap();
-    assert_eq!(response_missing_msg.status(), reqwest::StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response_missing_msg.status(),
+        reqwest::StatusCode::BAD_REQUEST
+    );
     let body_missing: serde_json::Value = response_missing_msg.json().await.unwrap();
-    assert!(body_missing["error"].as_str().unwrap().contains("Missing or invalid 'messages' array"));
+    assert!(body_missing["error"]
+        .as_str()
+        .unwrap()
+        .contains("Missing or invalid 'messages' array"));
 
     let _ = tx.send(());
     server_handle.await.unwrap();

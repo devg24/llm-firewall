@@ -18,6 +18,7 @@ serde_json = "1.0"
 reqwest = { version = "0.13.4", features = ["json", "stream"] }
 rcgen = "0.14.7"
 x509-parser = "0.18.1"
+ignore = "0.4.30"
 
 [dev-dependencies]
 tempfile = "3.27.0"

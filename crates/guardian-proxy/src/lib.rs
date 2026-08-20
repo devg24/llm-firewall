@@ -9,9 +9,9 @@
 
 pub mod proxy;
 
-use std::sync::Arc;
 use axum::{routing::get, Router};
 use guardian_core::ml::SharedModel;
+use std::sync::Arc;
 
 pub use proxy::{chat_completions_handler, proxy_handler, ProxyError};
 

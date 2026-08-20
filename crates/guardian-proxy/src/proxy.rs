@@ -1,10 +1,10 @@
+use crate::AppState;
 use axum::{
     body::Body,
     extract::State,
-    http::{HeaderMap, Method, Uri, StatusCode},
+    http::{HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
-use crate::AppState;
 use std::time::Instant;
 
 pub struct SyncStream<S>(std::sync::Mutex<S>);
@@ -71,7 +71,7 @@ pub async fn proxy_handler(
     let query = uri.query();
 
     let mut target_url = state.upstream_url.clone();
-    
+
     // Joint path logic to preserve configured base path prefix
     let base_path = target_url.path().trim_end_matches('/');
     let incoming_path = path.trim_start_matches('/');
@@ -81,7 +81,7 @@ pub async fn proxy_handler(
         format!("{}/{}", base_path, incoming_path)
     };
     target_url.set_path(&joined_path);
-    
+
     let merged_query = merge_queries(&state.upstream_url, query);
     target_url.set_query(merged_query.as_deref());
 
@@ -149,7 +149,7 @@ pub async fn proxy_handler(
     let axum_body = Body::from_stream(res_stream);
 
     let mut axum_res_builder = Response::builder().status(status.as_u16());
-    
+
     if let Some(headers_mut) = axum_res_builder.headers_mut() {
         *headers_mut = res_headers;
     }
@@ -157,8 +157,9 @@ pub async fn proxy_handler(
     axum_res_builder.body(axum_body).unwrap_or_else(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({ "error": "Security pipeline failure" }))
-        ).into_response()
+            axum::Json(serde_json::json!({ "error": "Security pipeline failure" })),
+        )
+            .into_response()
     })
 }
 
@@ -177,13 +178,16 @@ const HOP_BY_HOP_HEADERS: &[&str] = &[
 
 fn is_hop_by_hop(name: &axum::http::HeaderName) -> bool {
     let name_str = name.as_str();
-    HOP_BY_HOP_HEADERS.iter().any(|h| name_str.eq_ignore_ascii_case(h))
+    HOP_BY_HOP_HEADERS
+        .iter()
+        .any(|h| name_str.eq_ignore_ascii_case(h))
 }
 
 fn extract_hop_headers(headers: &HeaderMap) -> Result<Vec<String>, ProxyError> {
     let mut custom_hop_headers = Vec::new();
     for conn_val in headers.get_all(axum::http::header::CONNECTION) {
-        let conn_str = conn_val.to_str()
+        let conn_str = conn_val
+            .to_str()
             .map_err(|_| ProxyError::BadRequest("Invalid Connection header".to_string()))?;
         for part in conn_str.split(',') {
             let trimmed = part.trim();
@@ -195,10 +199,13 @@ fn extract_hop_headers(headers: &HeaderMap) -> Result<Vec<String>, ProxyError> {
     Ok(custom_hop_headers)
 }
 
-fn extract_res_hop_headers(headers: &reqwest::header::HeaderMap) -> Result<Vec<String>, ProxyError> {
+fn extract_res_hop_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> Result<Vec<String>, ProxyError> {
     let mut custom_res_hop_headers = Vec::new();
     for conn_val in headers.get_all(reqwest::header::CONNECTION) {
-        let conn_str = conn_val.to_str()
+        let conn_str = conn_val
+            .to_str()
             .map_err(|_| ProxyError::Upstream("Invalid response Connection header".to_string()))?;
         for part in conn_str.split(',') {
             let trimmed = part.trim();
@@ -220,7 +227,9 @@ fn copy_request_headers(
     for (name, value) in headers.iter() {
         let name_str = name.as_str();
         if !is_hop_by_hop(name)
-            && !custom_hop_headers.iter().any(|h| name_str.eq_ignore_ascii_case(h))
+            && !custom_hop_headers
+                .iter()
+                .any(|h| name_str.eq_ignore_ascii_case(h))
             && !name_str.eq_ignore_ascii_case("transfer-encoding")
         {
             req_headers.append(name.clone(), value.clone());
@@ -246,7 +255,9 @@ fn copy_response_headers(headers: &reqwest::header::HeaderMap) -> Result<HeaderM
     for (name, value) in headers.iter() {
         let name_str = name.as_str();
         if !is_hop_by_hop(name)
-            && !custom_res_hop_headers.iter().any(|h| name_str.eq_ignore_ascii_case(h))
+            && !custom_res_hop_headers
+                .iter()
+                .any(|h| name_str.eq_ignore_ascii_case(h))
             && !name_str.eq_ignore_ascii_case("transfer-encoding")
         {
             res_headers.append(name.clone(), value.clone());
@@ -335,7 +346,9 @@ impl From<guardian_core::CoreError> for ProxyError {
     fn from(err: guardian_core::CoreError) -> Self {
         match err {
             guardian_core::CoreError::TooManyRequests => ProxyError::TooManyRequests,
-            guardian_core::CoreError::InferenceTimeout => ProxyError::Timeout("Inference timeout".to_string()),
+            guardian_core::CoreError::InferenceTimeout => {
+                ProxyError::Timeout("Inference timeout".to_string())
+            }
             guardian_core::CoreError::PayloadValidation(msg) => ProxyError::BadRequest(msg),
             guardian_core::CoreError::ModelLoad(msg)
             | guardian_core::CoreError::Tokenization(msg)
@@ -357,20 +370,19 @@ pub async fn chat_completions_handler(
 
     // 1. Enforce 2MB limit check
     let limit = 2 * 1024 * 1024;
-    let bytes = axum::body::to_bytes(body, limit)
-        .await
-        .map_err(|e| {
-            use std::error::Error;
-            let is_limit = e.source()
-                .map(|src| src.to_string().to_lowercase().contains("limit"))
-                .unwrap_or(false)
-                || e.to_string().to_lowercase().contains("limit");
-            if is_limit {
-                ProxyError::PayloadTooLarge
-            } else {
-                ProxyError::Internal(e.to_string())
-            }
-        })?;
+    let bytes = axum::body::to_bytes(body, limit).await.map_err(|e| {
+        use std::error::Error;
+        let is_limit = e
+            .source()
+            .map(|src| src.to_string().to_lowercase().contains("limit"))
+            .unwrap_or(false)
+            || e.to_string().to_lowercase().contains("limit");
+        if is_limit {
+            ProxyError::PayloadTooLarge
+        } else {
+            ProxyError::Internal(e.to_string())
+        }
+    })?;
 
     // Parse payload into untyped JSON Value
     let mut payload: serde_json::Value = serde_json::from_slice(&bytes)
@@ -387,7 +399,7 @@ pub async fn chat_completions_handler(
     // 2. Reconstruct target URL
     let query = uri.query();
     let mut target_url = state.upstream_url.clone();
-    
+
     let base_path = target_url.path().trim_end_matches('/');
     let joined_path = if base_path.is_empty() {
         "/v1/chat/completions".to_string()
@@ -395,16 +407,19 @@ pub async fn chat_completions_handler(
         format!("{}/v1/chat/completions", base_path)
     };
     target_url.set_path(&joined_path);
-    
+
     let merged_query = merge_queries(&state.upstream_url, query);
     target_url.set_query(merged_query.as_deref());
 
     // 3. Prepare reqwest request headers
     let mut req_headers = copy_request_headers(&headers, &state.upstream_url)?;
-    
+
     // Set recalculated Content-Length
     let length = new_bytes.len();
-    req_headers.insert(reqwest::header::CONTENT_LENGTH, reqwest::header::HeaderValue::from(length));
+    req_headers.insert(
+        reqwest::header::CONTENT_LENGTH,
+        reqwest::header::HeaderValue::from(length),
+    );
 
     // 4. Send request
     let reqwest_body = reqwest::Body::from(new_bytes);
@@ -427,7 +442,7 @@ pub async fn chat_completions_handler(
     let res_headers = copy_response_headers(response.headers())?;
 
     let duration = start_time.elapsed().as_millis();
-    
+
     // Log success
     tracing::info!(
         method = method.as_str(),
@@ -449,7 +464,8 @@ pub async fn chat_completions_handler(
     Ok(axum_res_builder.body(axum_body).unwrap_or_else(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({ "error": "Security pipeline failure" }))
-        ).into_response()
+            axum::Json(serde_json::json!({ "error": "Security pipeline failure" })),
+        )
+            .into_response()
     }))
 }

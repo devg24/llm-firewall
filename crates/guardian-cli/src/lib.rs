@@ -6,17 +6,17 @@
 //! - The main server runtime function [`run_server`]
 
 use guardian_core::ml;
-use guardian_proxy::{AppState, create_app};
+use guardian_proxy::{create_app, AppState};
 use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 pub mod ca;
-
+pub mod patcher;
+pub mod scanner;
 /// Initializes stdout logging with an `EnvFilter` defaulting to `"info"`.
 pub fn init_logging() {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
-    
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
@@ -31,7 +31,9 @@ pub fn parse_port(port_env: Option<String>) -> Result<u16, String> {
             if trimmed.is_empty() {
                 Ok(3000)
             } else {
-                trimmed.parse::<u16>().map_err(|e| format!("Invalid port '{}': {}", trimmed, e))
+                trimmed
+                    .parse::<u16>()
+                    .map_err(|e| format!("Invalid port '{}': {}", trimmed, e))
             }
         }
         None => Ok(3000),
@@ -39,7 +41,9 @@ pub fn parse_port(port_env: Option<String>) -> Result<u16, String> {
 }
 
 /// Parses the `UPSTREAM_URL` environment variable or returns default `https://api.openai.com`.
-pub fn parse_upstream_url(url_env: Result<String, std::env::VarError>) -> Result<reqwest::Url, String> {
+pub fn parse_upstream_url(
+    url_env: Result<String, std::env::VarError>,
+) -> Result<reqwest::Url, String> {
     match url_env {
         Ok(val) => {
             let trimmed = val.trim();
@@ -49,7 +53,10 @@ pub fn parse_upstream_url(url_env: Result<String, std::env::VarError>) -> Result
                 let parsed = reqwest::Url::parse(trimmed)
                     .map_err(|e| format!("Invalid UPSTREAM_URL '{}': {}", trimmed, e))?;
                 if parsed.scheme() != "http" && parsed.scheme() != "https" {
-                    return Err(format!("Invalid UPSTREAM_URL '{}': Scheme must be http or https", trimmed));
+                    return Err(format!(
+                        "Invalid UPSTREAM_URL '{}': Scheme must be http or https",
+                        trimmed
+                    ));
                 }
                 if parsed.host().is_none() {
                     return Err(format!("Invalid UPSTREAM_URL '{}': Missing host", trimmed));
@@ -69,17 +76,46 @@ pub fn parse_upstream_url(url_env: Result<String, std::env::VarError>) -> Result
 /// Runs the firewall proxy server, reading configuration from environment variables.
 pub async fn run_server() {
     init_logging();
+    run_server_internal().await;
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+    tracing::info!("Graceful shutdown initiated...");
+}
+
+async fn run_server_internal() {
     guardian_core::init_regexes();
-    
+
     let port_var = match std::env::var("PORT") {
         Ok(val) => Some(val),
         Err(std::env::VarError::NotUnicode(_)) => {
             tracing::error!("Fatal: PORT environment variable is not valid unicode");
-            std::process::exit(1);
+            return;
         }
         Err(std::env::VarError::NotPresent) => None,
     };
-    
+
     let port = parse_port(port_var).unwrap_or_else(|e| {
         tracing::error!("Fatal: {}", e);
         std::process::exit(1);
@@ -103,7 +139,10 @@ pub async fn run_server() {
             std::process::exit(1);
         });
 
-    let mut model_dir = std::env::var("MODEL_DIR").unwrap_or_default().trim().to_string();
+    let mut model_dir = std::env::var("MODEL_DIR")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if model_dir.is_empty() {
         model_dir = "./model".to_string();
     }
@@ -115,12 +154,19 @@ pub async fn run_server() {
                 Some(std::sync::Arc::new(m))
             }
             Err(e) => {
-                tracing::warn!("Failed to load ML model from {}: {}. Continuing in regex-only mode.", model_dir, e);
+                tracing::warn!(
+                    "Failed to load ML model from {}: {}. Continuing in regex-only mode.",
+                    model_dir,
+                    e
+                );
                 None
             }
         }
     } else {
-        tracing::info!("Model directory '{}' not found. Running in regex-only mode.", model_dir);
+        tracing::info!(
+            "Model directory '{}' not found. Running in regex-only mode.",
+            model_dir
+        );
         None
     };
 
@@ -129,22 +175,28 @@ pub async fn run_server() {
         upstream_url,
         model: shared_model,
     };
-    
+
     let app = create_app(state);
-    
+
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
         Ok(l) => l,
         Err(e) => {
             tracing::error!("Failed to bind to port {}: {}", port, e);
-            std::process::exit(1);
+            return;
         }
     };
-    
+
     let bound_addr = listener.local_addr().unwrap_or(addr);
-    tracing::info!("Server started successfully and listening on {}", bound_addr);
-    
-    if let Err(e) = axum::serve(listener, app).await {
+    tracing::info!(
+        "Server started successfully and listening on {}",
+        bound_addr
+    );
+
+    if let Err(e) = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+    {
         tracing::error!("Server error: {}", e);
     }
 }
@@ -153,7 +205,7 @@ pub async fn run_server_with_trust() {
     init_logging();
     let ca_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let cert_dir = ca_dir.join(".llm-firewall-certs");
-    
+
     let ca = match ca::LocalCA::new(&cert_dir) {
         Ok(c) => c,
         Err(e) => {
@@ -164,26 +216,52 @@ pub async fn run_server_with_trust() {
 
     if let Err(e) = ca.trust() {
         tracing::error!("Failed to trust CA: {}", e);
-        // Continue anyway or exit? The AC says it sets OS configurations.
         std::process::exit(1);
     }
 
     tracing::info!("CA certificate trusted.");
 
-    let ca_clone = ca::LocalCA { cert_path: ca.cert_path.clone() };
+    struct OrchestratorGuard {
+        ca: ca::LocalCA,
+        patcher: patcher::ConfigPatcher,
+    }
 
-    tokio::spawn(async move {
-        tokio::signal::ctrl_c().await.unwrap();
-        tracing::info!("Graceful shutdown initiated. Untrusting CA...");
-        if let Err(e) = ca_clone.untrust() {
-            tracing::error!("Failed to untrust CA: {}", e);
-        } else {
-            tracing::info!("CA certificate untrusted.");
+    impl Drop for OrchestratorGuard {
+        fn drop(&mut self) {
+            tracing::info!("Untrusting CA...");
+            if let Err(e) = self.ca.untrust() {
+                tracing::error!("Failed to untrust CA: {}", e);
+            } else {
+                tracing::info!("CA certificate untrusted.");
+            }
+
+            tracing::info!("Restoring IDE configs...");
+            if let Err(e) = self.patcher.restore() {
+                tracing::error!("Failed to restore IDE configs: {}", e);
+            } else {
+                tracing::info!("IDE configs restored.");
+            }
         }
-        std::process::exit(0);
-    });
+    }
 
-    run_server().await;
+    let port_var = std::env::var("PORT").ok();
+    let port = parse_port(port_var).unwrap_or(3000);
+
+    let mut config_patcher = patcher::ConfigPatcher::new();
+    if let Err(e) = config_patcher.patch(port) {
+        tracing::error!("Failed to patch IDE configs: {}", e);
+        // Fail open or fail closed? Story says "Fail-closed security posture (if patching fails, exit cleanly without running the proxy or inform the user)."
+        std::process::exit(1);
+    }
+
+    let _guard = OrchestratorGuard {
+        ca: ca::LocalCA {
+            cert_path: ca.cert_path.clone(),
+        },
+        patcher: config_patcher,
+    };
+
+    run_server_internal().await;
 }
 
 #[cfg(test)]
