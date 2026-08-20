@@ -5,6 +5,9 @@ use axum::{
     http::{HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
+use futures_util::StreamExt;
+use guardian_core::TokenMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 pub struct SyncStream<S>(std::sync::Mutex<S>);
@@ -388,9 +391,43 @@ pub async fn chat_completions_handler(
     let mut payload: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| ProxyError::BadRequest(format!("Invalid JSON payload: {}", e)))?;
 
-    // Process/Redact payload recursively
-    guardian_core::process_completions_payload(&mut payload)
-        .map_err(|e| ProxyError::BadRequest(format!("Payload validation failure: {}", e)))?;
+    // Instantiate per-request TokenMap
+    let token_map_arc = Arc::new(std::sync::Mutex::new(TokenMap::new()));
+
+    // Run Orchestrator Pipeline
+    let orchestrator = guardian_core::orchestrator::DetectionOrchestrator::new(state.model.clone());
+    guardian_core::redact::process_completions_payload_with_orchestrator(
+        &mut payload,
+        &token_map_arc,
+        &orchestrator,
+    )
+    .await
+    .map_err(|e| ProxyError::BadRequest(format!("Pipeline failure: {}", e)))?;
+
+    // Inject system prompt guard instruction (AD-11)
+    if let Some(messages) = payload.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        if !messages.is_empty() {
+            let guard_instruction = "IMPORTANT: Do not alter, mutate, lowercase, or reformulate any token matching the pattern [REDACTED_*]. These tokens are placeholders and must be preserved exactly as-is.";
+
+            let has_system_first =
+                messages[0].get("role").and_then(|r| r.as_str()) == Some("system");
+
+            if has_system_first {
+                if let Some(content) = messages[0].get_mut("content") {
+                    if let Some(s) = content.as_str() {
+                        let new_content = format!("{}\n\n{}", guard_instruction, s);
+                        *content = serde_json::Value::String(new_content);
+                    }
+                }
+            } else {
+                let sys_msg = serde_json::json!({
+                    "role": "system",
+                    "content": guard_instruction
+                });
+                messages.insert(0, sys_msg);
+            }
+        }
+    }
 
     // Rebuild the request body bytes
     let new_bytes = serde_json::to_vec(&payload)
@@ -439,7 +476,7 @@ pub async fn chat_completions_handler(
     let status = response.status();
 
     // 5. Copy response headers, excluding hop-by-hop
-    let res_headers = copy_response_headers(response.headers())?;
+    let mut res_headers = copy_response_headers(response.headers())?;
 
     let duration = start_time.elapsed().as_millis();
 
@@ -452,9 +489,123 @@ pub async fn chat_completions_handler(
         "Intercepted completions request proxied successfully"
     );
 
-    // Reconstruct Response
-    let res_stream = response.bytes_stream();
-    let axum_body = Body::from_stream(res_stream);
+    // 6. Detect SSE via Content-Type: text/event-stream (AC-2, AC-3)
+    let is_sse = res_headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.contains("text/event-stream"))
+        .unwrap_or(false);
+
+    let axum_body = if is_sse {
+        // Strip Content-Length — SSE is always streamed/chunked, never fixed-length.
+        res_headers.remove(axum::http::header::CONTENT_LENGTH);
+
+        // Clone Arc for capture in the stream closure (unused in Story 3.1 — stub for 3.2).
+        let _token_map = Arc::clone(&token_map_arc);
+
+        // Build SSE passthrough stream using StreamExt combinators (AD-15: no manual poll_next).
+        // State: (upstream_stream, pending_events_buf, raw_byte_buf, done)
+        // We use unfold to drive the upstream bytes_stream and emit one complete SSE event
+        // per iteration, buffering partial data between polls.
+        let upstream_stream = response.bytes_stream();
+
+        type UpstreamStream =
+            dyn futures_core::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + Unpin;
+        struct SseState {
+            upstream: Box<UpstreamStream>,
+            buf: Vec<u8>,
+            pending: Vec<bytes::Bytes>,
+            done: bool,
+            token_map: Arc<std::sync::Mutex<TokenMap>>,
+            fragment_buf: String,
+            lookbehind: String,
+            sink_detector: guardian_core::DangerousSinkDetector,
+        }
+
+        let state = SseState {
+            upstream: Box::new(upstream_stream),
+            buf: Vec::new(),
+            pending: Vec::new(),
+            done: false,
+            token_map: token_map_arc,
+            fragment_buf: String::new(),
+            lookbehind: String::new(),
+            sink_detector: guardian_core::DangerousSinkDetector::new(),
+        };
+
+        let output_stream = futures_util::stream::unfold(state, |mut s| async move {
+            // If we have a queued event from a previous iteration, emit it first.
+            if let Some(event) = s.pending.pop() {
+                return Some((Ok::<bytes::Bytes, axum::Error>(event), s));
+            }
+
+            if s.done {
+                // Flush remaining bytes as a final item if any.
+                if !s.buf.is_empty() {
+                    let remaining = bytes::Bytes::from(std::mem::take(&mut s.buf));
+                    return Some((Ok(remaining), s));
+                }
+                return None;
+            }
+
+            // Pull chunks from upstream until we can emit at least one complete event.
+            loop {
+                // Check if we have a complete event in the buffer.
+                if let Some(pos) = find_double_newline(&s.buf) {
+                    let event: Vec<u8> = s.buf.drain(..pos).collect();
+                    let processed_event = process_sse_event(
+                        event,
+                        &mut s.fragment_buf,
+                        &s.token_map,
+                        &mut s.lookbehind,
+                        &s.sink_detector,
+                    );
+
+                    // Collect any additional complete events into pending (LIFO pop, so reverse).
+                    let mut extra = Vec::new();
+                    while let Some(p2) = find_double_newline(&s.buf) {
+                        let ev2: Vec<u8> = s.buf.drain(..p2).collect();
+                        let processed_ev2 = process_sse_event(
+                            ev2,
+                            &mut s.fragment_buf,
+                            &s.token_map,
+                            &mut s.lookbehind,
+                            &s.sink_detector,
+                        );
+                        extra.push(bytes::Bytes::from(processed_ev2));
+                    }
+                    extra.reverse();
+                    s.pending = extra;
+                    return Some((Ok(bytes::Bytes::from(processed_event)), s));
+                }
+
+                // Need more bytes — poll upstream.
+                match s.upstream.next().await {
+                    Some(Ok(chunk)) => {
+                        s.buf.extend_from_slice(&chunk);
+                    }
+                    Some(Err(e)) => {
+                        s.done = true;
+                        return Some((Err(axum::Error::new(e)), s));
+                    }
+                    None => {
+                        // Upstream ended; flush remainder if any, then stop.
+                        s.done = true;
+                        if !s.buf.is_empty() {
+                            let remaining = bytes::Bytes::from(std::mem::take(&mut s.buf));
+                            return Some((Ok(remaining), s));
+                        }
+                        return None;
+                    }
+                }
+            }
+        });
+
+        Body::from_stream(output_stream)
+    } else {
+        // Non-SSE: passthrough unchanged (AC-3)
+        Body::from_stream(response.bytes_stream())
+    };
 
     let mut axum_res_builder = Response::builder().status(status.as_u16());
     if let Some(headers_mut) = axum_res_builder.headers_mut() {
@@ -468,4 +619,150 @@ pub async fn chat_completions_handler(
         )
             .into_response()
     }))
+}
+
+fn process_sse_event(
+    event: Vec<u8>,
+    fragment_buf: &mut String,
+    token_map: &Arc<std::sync::Mutex<TokenMap>>,
+    lookbehind: &mut String,
+    sink_detector: &guardian_core::DangerousSinkDetector,
+) -> Vec<u8> {
+    let event_str = match std::str::from_utf8(&event) {
+        Ok(s) => s,
+        Err(_) => return event,
+    };
+
+    if !event_str.starts_with("data: ") {
+        return event;
+    }
+
+    let data_str = event_str.trim_start_matches("data: ").trim_end();
+    if data_str == "[DONE]" {
+        return event;
+    }
+
+    let mut parsed: serde_json::Value = match serde_json::from_str(data_str) {
+        Ok(v) => v,
+        Err(_) => return event,
+    };
+
+    let mut modified = false;
+    if let Some(choices) = parsed.get_mut("choices").and_then(|c| c.as_array_mut()) {
+        for choice in choices {
+            let content_target = if let Some(delta) = choice.get_mut("delta") {
+                delta.get_mut("content")
+            } else if let Some(message) = choice.get_mut("message") {
+                message.get_mut("content")
+            } else {
+                None
+            };
+
+            if let Some(serde_json::Value::String(content)) = content_target {
+                lookbehind.push_str(content.as_str());
+                if lookbehind.len() > 512 {
+                    let trim_pos = lookbehind.len() - 512;
+                    let mut char_pos = trim_pos;
+                    while char_pos < lookbehind.len() && !lookbehind.is_char_boundary(char_pos) {
+                        char_pos += 1;
+                    }
+                    *lookbehind = lookbehind[char_pos..].to_string();
+                }
+
+                let to_scan = fragment_buf.clone() + content.as_str();
+
+                let mut partial = String::new();
+                let mut full_content_to_replace = to_scan.clone();
+
+                if let Some(incomplete_start) = to_scan.rfind("[REDACT") {
+                    if !to_scan[incomplete_start..].contains(']') {
+                        partial = to_scan[incomplete_start..].to_string();
+                        full_content_to_replace = to_scan[..incomplete_start].to_string();
+                    }
+                }
+
+                *fragment_buf = partial;
+
+                let (tokens, original_values) = {
+                    let lock = token_map.lock().unwrap();
+                    let mut tokens = Vec::new();
+                    let mut original_values = Vec::new();
+                    for k in lock.keys() {
+                        if let Some((secret, _)) = lock.get(k) {
+                            tokens.push(k.clone());
+                            original_values.push(secret.clone());
+                        }
+                    }
+                    (tokens, original_values)
+                };
+
+                let final_content = if !tokens.is_empty() {
+                    let is_dangerous = sink_detector.is_dangerous_context(lookbehind);
+                    if is_dangerous {
+                        tracing::warn!(
+                            lookbehind = %lookbehind,
+                            "Dangerous sink context detected, blocking token re-injection"
+                        );
+                        full_content_to_replace
+                    } else {
+                        let ac = aho_corasick::AhoCorasick::new(&tokens).unwrap();
+                        ac.replace_all(&full_content_to_replace, &original_values)
+                    }
+                } else {
+                    full_content_to_replace
+                };
+
+                if final_content != content.as_str() {
+                    *content = final_content;
+                    modified = true;
+                }
+            }
+        }
+    }
+
+    if modified {
+        let mut new_event = String::from("data: ");
+        new_event.push_str(&serde_json::to_string(&parsed).unwrap());
+        new_event.push_str("\n\n");
+        return new_event.into_bytes();
+    }
+
+    event
+}
+
+/// Find the end boundary of the first complete SSE event in `buf`.
+///
+/// Returns `Some(pos)` where `pos` is the index *after* the `\n\n` delimiter,
+/// i.e. `buf[..pos]` is the complete event including both newlines.
+/// Returns `None` if no `\n\n` boundary is found.
+fn find_double_newline(buf: &[u8]) -> Option<usize> {
+    buf.windows(2).position(|w| w == b"\n\n").map(|pos| pos + 2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_double_newline_found() {
+        let data = b"data: hello\n\ndata: world\n\n";
+        assert_eq!(find_double_newline(data), Some(13));
+    }
+
+    #[test]
+    fn find_double_newline_not_found() {
+        let data = b"data: hello\n";
+        assert_eq!(find_double_newline(data), None);
+    }
+
+    #[test]
+    fn find_double_newline_at_start() {
+        let data = b"\n\ndata: hello\n\n";
+        assert_eq!(find_double_newline(data), Some(2));
+    }
+
+    #[test]
+    fn find_double_newline_empty() {
+        assert_eq!(find_double_newline(b""), None);
+    }
 }

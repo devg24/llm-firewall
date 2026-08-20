@@ -4,7 +4,17 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use unicode_normalization::UnicodeNormalization;
 
+use crate::token_map::TokenMap;
+
 pub fn process_completions_payload(payload: &mut serde_json::Value) -> Result<(), CoreError> {
+    let mut token_map = TokenMap::new();
+    process_completions_payload_with_map(payload, &mut token_map)
+}
+
+pub fn process_completions_payload_with_map(
+    payload: &mut serde_json::Value,
+    token_map: &mut TokenMap,
+) -> Result<(), CoreError> {
     let messages = payload
         .get_mut("messages")
         .and_then(|m| m.as_array_mut())
@@ -16,16 +26,16 @@ pub fn process_completions_payload(payload: &mut serde_json::Value) -> Result<()
 
     for message in messages {
         if let Some(content) = message.get_mut("content") {
-            mutate_content_field(content, &mut state, 0);
+            mutate_content_field(content, &mut state, token_map, 0);
         }
         if let Some(name) = message.get_mut("name") {
-            mutate_content_field(name, &mut state, 0);
+            mutate_content_field(name, &mut state, token_map, 0);
         }
         if let Some(tool_calls) = message.get_mut("tool_calls") {
-            mutate_content_field(tool_calls, &mut state, 0);
+            mutate_content_field(tool_calls, &mut state, token_map, 0);
         }
         if let Some(function_call) = message.get_mut("function_call") {
-            mutate_content_field(function_call, &mut state, 0);
+            mutate_content_field(function_call, &mut state, token_map, 0);
         }
     }
     Ok(())
@@ -34,6 +44,7 @@ pub fn process_completions_payload(payload: &mut serde_json::Value) -> Result<()
 pub fn mutate_content_field(
     content: &mut serde_json::Value,
     state: &mut RedactionState,
+    token_map: &mut TokenMap,
     depth: usize,
 ) {
     if depth > 100 {
@@ -44,11 +55,11 @@ pub fn mutate_content_field(
             let normalized = normalize_text(s);
             let mut matches = collect_regex_matches(&normalized);
             resolve_overlaps(&mut matches);
-            *s = redact_text(&normalized, &matches, state);
+            *s = redact_text(&normalized, &matches, state, token_map);
         }
         serde_json::Value::Array(arr) => {
             for item in arr {
-                mutate_content_field(item, state, depth + 1);
+                mutate_content_field(item, state, token_map, depth + 1);
             }
         }
         serde_json::Value::Object(obj) => {
@@ -56,14 +67,14 @@ pub fn mutate_content_field(
                 let normalized = normalize_text(text_val);
                 let mut matches = collect_regex_matches(&normalized);
                 resolve_overlaps(&mut matches);
-                *text_val = redact_text(&normalized, &matches, state);
+                *text_val = redact_text(&normalized, &matches, state, token_map);
             }
             for (key, val) in obj.iter_mut() {
                 if key != "image_url" && key != "type" && key != "role" {
                     if key == "text" && val.is_string() {
                         continue;
                     }
-                    mutate_content_field(val, state, depth + 1);
+                    mutate_content_field(val, state, token_map, depth + 1);
                 }
             }
         }
@@ -146,7 +157,8 @@ pub fn bearer_regex() -> &'static Regex {
     BEARER_REGEX.get_or_init(|| Regex::new(BEARER_PATTERN).unwrap())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PiiType {
     Ssn,
     Cc,
@@ -157,6 +169,9 @@ pub enum PiiType {
     Gcp,
     Github,
     Bearer,
+    HighEntropy,
+    Person,
+    Unknown,
 }
 
 impl PiiType {
@@ -171,6 +186,9 @@ impl PiiType {
             PiiType::Gcp => "GCP",
             PiiType::Github => "GITHUB",
             PiiType::Bearer => "BEARER",
+            PiiType::HighEntropy => "HIGH_ENTROPY",
+            PiiType::Person => "PERSON",
+            PiiType::Unknown => "UNKNOWN",
         }
     }
 }
@@ -349,7 +367,12 @@ impl RedactionState {
     }
 }
 
-pub fn redact_text(text: &str, matches: &[PiiMatch], state: &mut RedactionState) -> String {
+pub fn redact_text(
+    text: &str,
+    matches: &[PiiMatch],
+    state: &mut RedactionState,
+    token_map: &mut TokenMap,
+) -> String {
     let mut redacted = String::with_capacity(text.len());
     let mut last_idx = 0;
 
@@ -358,6 +381,7 @@ pub fn redact_text(text: &str, matches: &[PiiMatch], state: &mut RedactionState)
             redacted.push_str(&text[last_idx..m.start]);
         }
         let token = state.get_or_create_token(&m.value, m.pii_type);
+        token_map.insert(token.clone(), m.value.clone(), m.pii_type);
         redacted.push_str(&token);
         last_idx = m.end;
     }
@@ -536,7 +560,8 @@ mod tests {
         resolve_overlaps(&mut matches);
 
         let mut state = RedactionState::new();
-        let redacted = redact_text(&normalized, &matches, &mut state);
+        let mut token_map = TokenMap::new();
+        let redacted = redact_text(&normalized, &matches, &mut state, &mut token_map);
 
         assert_eq!(
             redacted,
@@ -639,4 +664,93 @@ mod tests {
             "Same phone: [REDACTED_PHONE_1] and name John Doe [REDACTED_SSN_1]"
         );
     }
+}
+
+pub async fn process_completions_payload_with_orchestrator(
+    payload: &mut serde_json::Value,
+    token_map: &std::sync::Arc<std::sync::Mutex<crate::token_map::TokenMap>>,
+    orchestrator: &crate::orchestrator::DetectionOrchestrator,
+) -> Result<(), crate::CoreError> {
+    let messages = payload
+        .get_mut("messages")
+        .and_then(|m| m.as_array_mut())
+        .ok_or_else(|| {
+            crate::CoreError::PayloadValidation("Missing or invalid 'messages' array".to_string())
+        })?;
+
+    for message in messages {
+        if let Some(content) = message.get_mut("content") {
+            mutate_content_field_with_orchestrator(content, token_map, orchestrator, 0).await;
+        }
+    }
+
+    Ok(())
+}
+
+use futures_util::future::BoxFuture;
+use futures_util::FutureExt;
+
+pub fn mutate_content_field_with_orchestrator<'a>(
+    content: &'a mut serde_json::Value,
+    token_map: &'a std::sync::Arc<std::sync::Mutex<crate::token_map::TokenMap>>,
+    orchestrator: &'a crate::orchestrator::DetectionOrchestrator,
+    depth: usize,
+) -> BoxFuture<'a, ()> {
+    async move {
+        if depth > 100 {
+            return;
+        }
+        match content {
+            serde_json::Value::String(s) => {
+                let text = s.clone();
+                if let Ok(mut spans) = orchestrator.orchestrate(&text).await {
+                    if !spans.is_empty() {
+                        spans.sort_by_key(|span| span.start);
+                        let mut redacted = text.clone();
+                        let mut offset: isize = 0;
+                        let mut counters = std::collections::HashMap::new();
+
+                        for span in spans {
+                            let actual_start = (span.start as isize + offset) as usize;
+                            let actual_end = (span.end as isize + offset) as usize;
+
+                            if actual_start > redacted.len() || actual_end > redacted.len() {
+                                continue;
+                            }
+
+                            let secret = redacted[actual_start..actual_end].to_string();
+                            let pii_type = span.label;
+
+                            let count = counters.entry(pii_type).or_insert(1);
+                            let token = format!("[REDACTED_{}_{}]", pii_type.as_str(), count);
+                            *count += 1;
+
+                            {
+                                let mut lock = token_map.lock().unwrap();
+                                lock.insert(token.clone(), secret.clone(), pii_type);
+                            };
+
+                            redacted.replace_range(actual_start..actual_end, &token);
+                            offset += token.len() as isize - (actual_end - actual_start) as isize;
+                        }
+                        *s = redacted;
+                    }
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for v in arr {
+                    mutate_content_field_with_orchestrator(v, token_map, orchestrator, depth + 1)
+                        .await;
+                }
+            }
+            serde_json::Value::Object(obj) => {
+                for v in obj.values_mut() {
+                    mutate_content_field_with_orchestrator(v, token_map, orchestrator, depth + 1)
+                        .await;
+                }
+            }
+            _ => {}
+        }
+    }
+    .boxed()
 }

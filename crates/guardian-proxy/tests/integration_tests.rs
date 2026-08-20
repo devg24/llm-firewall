@@ -417,7 +417,7 @@ async fn test_proxy_chat_completions_complex() {
     assert_eq!(sent_to_upstream["model"], "gpt-4-vision");
     assert_eq!(sent_to_upstream["temperature"], 0.7);
 
-    let msg_content = &sent_to_upstream["messages"][0]["content"];
+    let msg_content = &sent_to_upstream["messages"][1]["content"];
     assert_eq!(msg_content[0]["type"], "text");
     assert_eq!(
         msg_content[0]["text"],

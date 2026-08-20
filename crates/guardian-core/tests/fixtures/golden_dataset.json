@@ -1,0 +1,292 @@
+[
+  {
+    "id": "REG-EMAIL-01",
+    "category": "email",
+    "description": "Standard email address in user sentence",
+    "text": "Contact me at alice@wonderland.com for the documents.",
+    "expected_spans": [
+      {
+        "start": 14,
+        "end": 34,
+        "text": "alice@wonderland.com",
+        "label": "EMAIL"
+      }
+    ]
+  },
+  {
+    "id": "REG-EMAIL-02",
+    "category": "email",
+    "description": "Subdomain and plus-addressed email",
+    "text": "Send reports to engineering+security@sub.corp.example.org immediately.",
+    "expected_spans": [
+      {
+        "start": 16,
+        "end": 57,
+        "text": "engineering+security@sub.corp.example.org",
+        "label": "EMAIL"
+      }
+    ]
+  },
+  {
+    "id": "REG-PHONE-01",
+    "category": "phone",
+    "description": "US dashed phone number",
+    "text": "Call our hotline at 123-456-7890 if you need help.",
+    "expected_spans": [
+      {
+        "start": 20,
+        "end": 32,
+        "text": "123-456-7890",
+        "label": "PHONE"
+      }
+    ]
+  },
+  {
+    "id": "REG-PHONE-02",
+    "category": "phone",
+    "description": "Parenthesized phone number",
+    "text": "Office telephone is (800) 555-0199 extension 4.",
+    "expected_spans": [
+      {
+        "start": 21,
+        "end": 34,
+        "text": "800) 555-0199",
+        "label": "PHONE"
+      }
+    ]
+  },
+  {
+    "id": "REG-SSN-01",
+    "category": "ssn",
+    "description": "US Social Security Number",
+    "text": "Applicant identifier: 123-45-6789 for tax purposes.",
+    "expected_spans": [
+      {
+        "start": 22,
+        "end": 33,
+        "text": "123-45-6789",
+        "label": "SSN"
+      }
+    ]
+  },
+  {
+    "id": "REG-CC-01",
+    "category": "credit_card",
+    "description": "16-digit credit card number with hyphens",
+    "text": "Billed to card 1234-5678-9012-3456 expires 12/28.",
+    "expected_spans": [
+      {
+        "start": 15,
+        "end": 34,
+        "text": "1234-5678-9012-3456",
+        "label": "CC"
+      }
+    ]
+  },
+  {
+    "id": "REG-IP-01",
+    "category": "ip",
+    "description": "Internal and external IPv4 addresses",
+    "text": "Ingress IP 192.168.1.1 forwarded to 10.0.0.50 internal.",
+    "expected_spans": [
+      {
+        "start": 11,
+        "end": 22,
+        "text": "192.168.1.1",
+        "label": "IP"
+      },
+      {
+        "start": 36,
+        "end": 45,
+        "text": "10.0.0.50",
+        "label": "IP"
+      }
+    ]
+  },
+  {
+    "id": "REG-AWS-01",
+    "category": "aws_key",
+    "description": "Standard AWS access key ID",
+    "text": "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+    "expected_spans": [
+      {
+        "start": 25,
+        "end": 45,
+        "text": "AKIAIOSFODNN7EXAMPLE",
+        "label": "AWS"
+      }
+    ]
+  },
+  {
+    "id": "REG-GCP-01",
+    "category": "gcp_key",
+    "description": "Standard GCP API key",
+    "text": "const apiKey = \"AIzaSyB_1234567890ABCDEFGHIJKLMNOPQRS12\";",
+    "expected_spans": [
+      {
+        "start": 16,
+        "end": 55,
+        "text": "AIzaSyB_1234567890ABCDEFGHIJKLMNOPQRS12",
+        "label": "GCP"
+      }
+    ]
+  },
+  {
+    "id": "REG-GH-01",
+    "category": "github_token",
+    "description": "GitHub personal access token (classic)",
+    "text": "Authorization: token ghp_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+    "expected_spans": [
+      {
+        "start": 21,
+        "end": 61,
+        "text": "ghp_1234567890ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        "label": "GITHUB"
+      }
+    ]
+  },
+  {
+    "id": "REG-BEARER-01",
+    "category": "bearer",
+    "description": "HTTP Bearer token header",
+    "text": "Authorization: Bearer abcdef1234567890abcdef",
+    "expected_spans": [
+      {
+        "start": 15,
+        "end": 44,
+        "text": "Bearer abcdef1234567890abcdef",
+        "label": "BEARER"
+      }
+    ]
+  },
+  {
+    "id": "FP-CODE-01",
+    "category": "false_positive_code",
+    "description": "Rust function definition with simple logic",
+    "text": "pub fn add_numbers(a: i32, b: i32) -> i32 { a + b }",
+    "expected_spans": []
+  },
+  {
+    "id": "FP-CODE-02",
+    "category": "false_positive_code",
+    "description": "Regex pattern inside code snippet",
+    "text": "const EMAIL_REGEX = r\"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\\.[a-zA-Z0-9-.]+$\";",
+    "expected_spans": []
+  },
+  {
+    "id": "FP-LOG-01",
+    "category": "false_positive_log",
+    "description": "Standard timestamped log message without sensitive data",
+    "text": "2026-08-20T12:00:00Z [INFO] Server started on port 8080 successfully.",
+    "expected_spans": []
+  },
+  {
+    "id": "FP-INVALID-EMAIL-01",
+    "category": "false_positive_text",
+    "description": "Incomplete email missing domain or user",
+    "text": "The pattern test@ is invalid, as is @example.com without username.",
+    "expected_spans": []
+  },
+  {
+    "id": "FP-INVALID-IP-01",
+    "category": "false_positive_text",
+    "description": "Out-of-range octets for IPv4",
+    "text": "Invalid gateway address configured: 999.999.999.999.",
+    "expected_spans": []
+  },
+  {
+    "id": "FP-SHORT-NUM-01",
+    "category": "false_positive_text",
+    "description": "Five-digit zip code or port number (not a phone)",
+    "text": "Zip code 90210, customer reference 12345, port 5432.",
+    "expected_spans": []
+  },
+  {
+    "id": "ENT-KEY-01",
+    "category": "high_entropy",
+    "description": "High-entropy alphanumeric secret password",
+    "text": "Database credentials secret: xQ9!pL4$mN2@kR7#vB5^",
+    "expected_spans": [
+      {
+        "start": 29,
+        "end": 49,
+        "text": "xQ9!pL4$mN2@kR7#vB5^",
+        "label": "HIGH_ENTROPY"
+      }
+    ]
+  },
+  {
+    "id": "ENT-B64-01",
+    "category": "high_entropy",
+    "description": "High-entropy random base64 string",
+    "text": "API Secret: dGhpcy1pcy1hLXZlcnktbG9uZy1iYXNlNjQtc3RyaW5nLXdpdGgtaGlnaC1lbnRyb3B5Cg==",
+    "expected_spans": [
+      {
+        "start": 12,
+        "end": 80,
+        "text": "dGhpcy1pcy1hLXZlcnktbG9uZy1iYXNlNjQtc3RyaW5nLXdpdGgtaGlnaC1lbnRyb3B5Cg==",
+        "label": "HIGH_ENTROPY"
+      }
+    ]
+  },
+  {
+    "id": "CASCADE-MULTI-01",
+    "category": "multi_entity",
+    "description": "Multiple mixed entity types in a single production deployment prompt",
+    "text": "Deploying service for admin@corp.net using AWS key AKIAIOSFODNN7EXAMPLE on node 10.100.4.20 with phone 555-123-4567.",
+    "expected_spans": [
+      {
+        "start": 22,
+        "end": 36,
+        "text": "admin@corp.net",
+        "label": "EMAIL"
+      },
+      {
+        "start": 51,
+        "end": 71,
+        "text": "AKIAIOSFODNN7EXAMPLE",
+        "label": "AWS"
+      },
+      {
+        "start": 80,
+        "end": 91,
+        "text": "10.100.4.20",
+        "label": "IP"
+      },
+      {
+        "start": 103,
+        "end": 115,
+        "text": "555-123-4567",
+        "label": "PHONE"
+      }
+    ]
+  },
+  {
+    "id": "ADVERSARIAL-COMMENT-01",
+    "category": "adversarial",
+    "description": "Secret hidden inside source code comment",
+    "text": "// TODO: remove debug key AKIAIOSFODNN7EXAMPLE before production release",
+    "expected_spans": [
+      {
+        "start": 26,
+        "end": 46,
+        "text": "AKIAIOSFODNN7EXAMPLE",
+        "label": "AWS"
+      }
+    ]
+  },
+  {
+    "id": "ADVERSARIAL-MARKDOWN-01",
+    "category": "adversarial",
+    "description": "Secret wrapped in markdown backticks",
+    "text": "Please verify that the key `AKIAIOSFODNN7EXAMPLE` is active.",
+    "expected_spans": [
+      {
+        "start": 28,
+        "end": 48,
+        "text": "AKIAIOSFODNN7EXAMPLE",
+        "label": "AWS"
+      }
+    ]
+  }
+]
