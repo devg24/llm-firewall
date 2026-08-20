@@ -48,16 +48,18 @@ graph TD
 
 ```text
 llm-firewall-rs/
+├── crates/
+│   ├── guardian-core/   # Pure detection engine, regex/ML, co-ref state & token maps
+│   ├── guardian-proxy/  # Axum MITM proxy, streaming handlers & upstream client
+│   └── guardian-cli/    # CLI entrypoint, argument/env parsing, and server runtime
 ├── src/
-│   ├── main.rs          # Entry point, environment parsing, and HTTP server bootstrap
-│   ├── proxy.rs         # Transparent routing, header translation, and upstream forwarding
-│   ├── ml.rs            # Candle model config, tokenization, and blocking execution boundary
-│   └── redact.rs        # Tier 1 Regex engine, span resolver, and payload rebuilder
-├── docs/
-│   └── planning-artifacts/ # System architecture docs and specifications
+│   └── main.rs          # Root binary forwarder stub calling guardian-cli
+├── docs/                # BMAD planning, architecture spines, specs & implementation stories
+├── model/               # Local quantized NER model assets (safetensors & tokenizers)
 ├── scripts/
 │   └── setup_model.sh   # Downloads model safetensors and configurations locally
-└── Cargo.toml           # Package configuration and dependencies
+├── AGENTS.md            # Agent guidelines and context hygiene rules
+└── Cargo.toml           # Multi-crate Cargo workspace configuration
 ```
 
 ---

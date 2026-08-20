@@ -10,6 +10,8 @@ use guardian_proxy::{AppState, create_app};
 use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+pub mod ca;
+
 /// Initializes stdout logging with an `EnvFilter` defaulting to `"info"`.
 pub fn init_logging() {
     let filter = EnvFilter::try_from_default_env()
@@ -145,6 +147,43 @@ pub async fn run_server() {
     if let Err(e) = axum::serve(listener, app).await {
         tracing::error!("Server error: {}", e);
     }
+}
+
+pub async fn run_server_with_trust() {
+    init_logging();
+    let ca_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cert_dir = ca_dir.join(".llm-firewall-certs");
+    
+    let ca = match ca::LocalCA::new(&cert_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to generate CA: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = ca.trust() {
+        tracing::error!("Failed to trust CA: {}", e);
+        // Continue anyway or exit? The AC says it sets OS configurations.
+        std::process::exit(1);
+    }
+
+    tracing::info!("CA certificate trusted.");
+
+    let ca_clone = ca::LocalCA { cert_path: ca.cert_path.clone() };
+
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.unwrap();
+        tracing::info!("Graceful shutdown initiated. Untrusting CA...");
+        if let Err(e) = ca_clone.untrust() {
+            tracing::error!("Failed to untrust CA: {}", e);
+        } else {
+            tracing::info!("CA certificate untrusted.");
+        }
+        std::process::exit(0);
+    });
+
+    run_server().await;
 }
 
 #[cfg(test)]
