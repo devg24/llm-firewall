@@ -1,4 +1,5 @@
 use crate::detect::{Detector, EntropyDetector, NerDetector, RegexDetector, Span};
+use crate::domain::DomainProfile;
 use crate::error::CoreError;
 use crate::ml::SharedModel;
 use std::cmp::Ordering;
@@ -11,10 +12,23 @@ pub struct DetectionOrchestrator {
 }
 
 impl DetectionOrchestrator {
+    /// Create an orchestrator with an optional ML model and optional domain profile.
+    ///
+    /// When `domain` is `None`, the `Standard` profile thresholds are applied.
     pub fn new(model: Option<Arc<SharedModel>>) -> Self {
+        Self::with_domain(model, DomainProfile::Standard)
+    }
+
+    /// Create an orchestrator with a specific domain profile.
+    ///
+    /// The domain profile's `entropy_tier` threshold (raw Shannon bits, 0–8 scale)
+    /// is applied to the `EntropyDetector`. This is the primary lever for reducing
+    /// domain-specific false positives (e.g. crypto pubkeys, FHIR UUIDs).
+    pub fn with_domain(model: Option<Arc<SharedModel>>, domain: DomainProfile) -> Self {
+        let thresholds = domain.thresholds();
         Self {
             regex: RegexDetector,
-            entropy: EntropyDetector::default(),
+            entropy: EntropyDetector::with_threshold(thresholds.entropy_tier),
             ner: NerDetector::new(model),
         }
     }
@@ -22,11 +36,11 @@ impl DetectionOrchestrator {
     pub async fn orchestrate(&self, text: &str) -> Result<Vec<Span>, CoreError> {
         let mut spans = Vec::new();
 
-        // Tier 1: Regex
+        // Tier 1: Regex — deterministic, exact-match, always confidence 1.0
         let tier1_spans = self.regex.detect(text);
         spans.extend(tier1_spans.into_iter().filter(|s| s.confidence >= 1.0));
 
-        // Tier 2: Entropy
+        // Tier 2: Entropy — threshold set by domain profile
         let tier2_spans = self.entropy.detect(text);
         spans.extend(tier2_spans.into_iter().filter(|s| s.confidence >= 0.5));
 

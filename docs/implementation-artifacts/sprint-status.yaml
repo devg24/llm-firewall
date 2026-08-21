@@ -101,16 +101,16 @@ action_items:
   - epic: 3
     action: "Define domain profile schema and threshold tuning matrix (standard vs crypto/fintech) for DomainDetector"
     owner: "Winston"
-    status: open
+    status: done
   - epic: 3
     action: "Implement manifest parser (Cargo.toml, package.json) supporting monorepos in guardian-core"
     owner: "Amelia"
-    status: open
+    status: done
   - epic: 3
     action: "Implement .guardian.toml parser with ReDoS pre-validation"
     owner: "Amelia"
-    status: open
+    status: done
   - epic: 3
     action: "Add test suite with real-world open source manifests to verify fail-safe fallback on malformed configs"
     owner: "Dana"
-    status: open
+    status: done

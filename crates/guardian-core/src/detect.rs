@@ -57,6 +57,18 @@ impl Default for EntropyDetector {
     }
 }
 
+impl EntropyDetector {
+    /// Construct with a custom threshold (raw Shannon bits, 0.0–8.0 scale).
+    /// Used by `DetectionOrchestrator::with_domain` to apply domain-derived thresholds.
+    pub fn with_threshold(threshold: f32) -> Self {
+        Self {
+            window_size: 20,
+            threshold,
+            min_span_len: 20,
+        }
+    }
+}
+
 fn shannon_entropy(s: &str) -> f32 {
     if s.is_empty() {
         return 0.0;
