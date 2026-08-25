@@ -170,10 +170,26 @@ async fn run_server_internal() {
         None
     };
 
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let guardian_toml_path = cwd.join(".guardian.toml");
+    let guardian_config = guardian_core::manifest::parse_guardian_toml(&guardian_toml_path);
+    if guardian_config.is_some() {
+        tracing::info!(path = ?guardian_toml_path, "Loaded custom .guardian.toml configuration");
+    }
+
+    let domain = guardian_core::manifest::detect_domain_from_manifests(&cwd);
+    tracing::info!(
+        domain = ?domain,
+        entropy_threshold = domain.thresholds().entropy_tier,
+        "Active project domain profile"
+    );
+
     let state = AppState {
         client,
         upstream_url,
         model: shared_model,
+        domain,
+        guardian_config,
     };
 
     let app = create_app(state);

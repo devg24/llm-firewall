@@ -1,19 +1,24 @@
 ---
-name: llm-firewall-rs
+name: llm-firewall-rs (v1 MVP - ARCHIVED)
 type: architecture-spine
 purpose: build-substrate
 altitude: system
 paradigm: Intercepting Filter Proxy
 scope: Guardian-AI system proxy and security pipeline
-status: final
+status: superseded
 created: 2026-06-26
-updated: 2026-06-26
+updated: 2026-08-25
+superseded_by: docs/planning-artifacts/architecture/architecture-llm-firewall-rs-elevation-2026-08-19/ARCHITECTURE-SPINE.md
 binds: []
 sources: []
 companions: []
 ---
 
-# Architecture Spine — llm-firewall-rs
+> [!WARNING]
+> **ARCHIVED / SUPERSEDED ARCHITECTURE**
+> This document describes the initial v1 MVP system architecture. It has been elevated and superseded by the v2 Architecture Spine: [architecture-llm-firewall-rs-elevation-2026-08-19](file:///Users/devgoyal/desktop/llm-firewall-rs/docs/planning-artifacts/architecture/architecture-llm-firewall-rs-elevation-2026-08-19/ARCHITECTURE-SPINE.md). Note that invariants AD-1 through AD-11 are inherited by the v2 elevation spine.
+
+# Architecture Spine — llm-firewall-rs (v1 MVP)
 
 ## Design Paradigm
 

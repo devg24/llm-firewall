@@ -1,14 +1,19 @@
 ---
-title: Guardian-AI
+title: Guardian-AI (MVP / v1 - ARCHIVED)
 created: 2026-06-26
-updated: 2026-06-26
-status: final
+updated: 2026-08-25
+status: superseded
+superseded_by: docs/specs/spec-guardian-ai-v2/SPEC.md
 ---
 
-# PRD: Guardian-AI
+> [!WARNING]
+> **ARCHIVED / SUPERSEDED DOCUMENT**
+> This document describes the initial v1 MVP (one-way stateless PII proxy). It has been superseded by the v2 specification: [SPEC-guardian-ai-v2](file:///Users/devgoyal/desktop/llm-firewall-rs/docs/specs/spec-guardian-ai-v2/SPEC.md). Please refer to the v2 specification for current product requirements and capabilities.
+
+# PRD: Guardian-AI (v1 MVP)
 
 ## 0. Document Purpose
-This document specifies the requirements for Guardian-AI, a high-performance reverse proxy designed for enterprise GenAI applications. It is intended for software engineers and architects building the system. It replaces the initial draft and incorporates all architectural and compliance decisions made during the planning phase.
+This document specifies the requirements for the initial v1 MVP of Guardian-AI.
 
 ## 1. Vision
 Guardian-AI is a blazing-fast, zero-overhead reverse proxy written in Rust designed to sit between enterprise applications and Large Language Model (LLM) APIs. Its primary purpose is to intercept network traffic and perform stateless 1-way redaction of sensitive data (PII) using a locally quantized token-classification model. This ensures no sensitive data ever reaches external APIs like OpenAI or Anthropic, unblocking GenAI adoption for strict compliance environments.

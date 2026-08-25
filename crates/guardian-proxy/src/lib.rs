@@ -10,6 +10,7 @@
 pub mod proxy;
 
 use axum::{routing::get, Router};
+use guardian_core::domain::DomainProfile;
 use guardian_core::ml::SharedModel;
 use std::sync::Arc;
 
@@ -27,6 +28,10 @@ pub struct AppState {
     pub upstream_url: reqwest::Url,
     /// Optional shared BERT ML model for NER-based inference.
     pub model: Option<Arc<SharedModel>>,
+    /// Active domain profile auto-detected from project manifests or config.
+    pub domain: DomainProfile,
+    /// Optional power-user configuration loaded from .guardian.toml.
+    pub guardian_config: Option<guardian_core::manifest::GuardianConfig>,
 }
 
 /// Builds the Axum [`Router`] with all proxy routes attached to `state`.

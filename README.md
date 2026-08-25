@@ -5,21 +5,26 @@
 [![Axum](https://img.shields.io/badge/axum-0.8.9-red.svg?style=flat-square)](https://github.com/tokio-rs/axum)
 [![Tokio](https://img.shields.io/badge/tokio-1.52.3-blueviolet.svg?style=flat-square)](https://tokio.rs/)
 
-**Guardian-AI** is a blazing-fast, zero-overhead stateless intercepting filter proxy written in Rust. It sits between enterprise applications and external Large Language Model (LLM) APIs (such as OpenAI, Anthropic, or custom endpoints) to perform stateless, one-way redaction of sensitive data (PII).
+**Guardian-AI** is a blazing-fast, zero-overhead, bidirectional stateful intercepting filter proxy written in Rust. It sits between AI coding assistants / enterprise applications (such as Claude Code, Cursor, Copilot, or custom LLM clients) and external Large Language Model (LLM) APIs (OpenAI, Anthropic, or custom endpoints).
 
-By combining high-performance regex scanning with quantized local Machine Learning (NER) models running via Hugging Face's `candle-core`, Guardian-AI ensures that no sensitive personal data ever crosses the enterprise boundary—fully air-gapped and with zero runtime external API dependencies.
+Guardian-AI provides an air-gapped, zero-leakage guarantee by automatically replacing detected secrets and PII with indexed semantic placeholder tokens outbound, and transparently re-injecting the real values into the inbound LLM response stream.
 
 ---
 
-## ⚡ Key Features
+## ⚡ Key Capabilities
 
-*   **🚀 Zero-Overhead Async Architecture**: Built with [Axum](https://github.com/tokio-rs/axum), [Tokio](https://tokio.rs/), and [Reqwest](https://github.com/seanmonstar/reqwest), featuring transparent pass-through routing, async body streaming, and HTTP connection pooling.
-*   **🛡️ Multi-Tier Redaction Engine**:
-    *   **Tier 1 (Regex)**: High-speed scanning using pre-compiled, thread-safe patterns for strict formats (US SSNs, Credit Cards, Emails, Phone Numbers, and IP Addresses).
-    *   **Tier 2 (ML NER)**: Local, quantized Named Entity Recognition (NER) models (e.g., `dslim/bert-base-NER`) executing CPU-bound inference safely isolated from async worker threads.
-*   **🔗 Co-Reference Preserving**: Translates identical PII entities to matching indexed semantic tokens (e.g., `John Doe` -> `[REDACTED_NAME_1]`) consistently across the request, preserving contextual relationships.
-*   **🔒 Fail-Closed Policy**: Standard enterprise security posture. Any failure in the parsing, regex evaluation, or ML execution triggers a fail-closed `500 Internal Server Error` to guarantee zero PII leakage.
-*   **🔄 Transparent Fallback**: Functions as a drop-in replacement for downstream API wrappers. Only completions payloads (`POST /v1/chat/completions`) are intercepted; all other endpoints are transparently forwarded.
+*   **🔄 Bidirectional Stateful Proxying**: Transparently intercepts outbound LLM requests, swaps sensitive data with indexed tokens (e.g. `[REDACTED_SECRET_1]`), and re-injects the original values into inbound Server-Sent Events (SSE) streaming responses in real time.
+*   **🛡️ 4-Tier Cascading Detection Pipeline**:
+    *   **Tier 1 (Pattern Matching)**: Deterministic regex scanning for strict formats (SSNs, Credit Cards, Emails, Phone Numbers, IPs, AWS/GitHub/OAuth tokens).
+    *   **Tier 2 (Contextual Entropy)**: Shannon entropy scoring combined with context analysis to catch unknown-format API keys and passwords while suppressing false positives on UUIDs, hashes, and base64 assets.
+    *   **Tier 3 (Local ML NER)**: Local BERT Named Entity Recognition using Hugging Face's `candle-core` for context-dependent entity detection.
+    *   **Tier 4 (Contextual Classifier)**: ONNX-based (`ort`) ML classifier targeting borderline confidence spans within a tight latency budget.
+*   **🛡️ Context-Aware Dangerous Sink Blocking**: Inspects a rolling 512-byte lookbehind buffer on inbound streams to prevent re-injecting secrets into dangerous exfiltration sinks (such as `curl`, `fetch`, `subprocess`, or file writes outside the workspace).
+*   **⚡ Zero-Config CLI with Local CA Trust**: `llm-firewall on` automatically generates and installs a local CA certificate into the OS trust store and auto-patches configuration for installed AI tools (Claude Code, Cursor, Copilot) with zero manual config files.
+*   **🔍 First-Run Scare Report Scanner**: `llm-firewall scan` silently analyzes local workspaces to uncover potential secret exposures and generate compliance-ready exposure cost reports.
+*   **🎯 Domain Profile Auto-Tuning**: Auto-detects project domains (e.g., standard, crypto/fintech, healthcare) by scanning project manifests (`Cargo.toml`, `package.json`), automatically adjusting detection thresholds.
+*   **⚙️ Power-User Configuration**: Supports optional repository overrides via `.guardian.toml` with ReDoS pre-validation and graceful fallback to zero-config defaults.
+*   **🔒 Fail-Closed Security & Pure Rust Safety**: 100% fail-closed posture across all pipelines with zero `unsafe` Rust.
 
 ---
 
@@ -27,39 +32,36 @@ By combining high-performance regex scanning with quantized local Machine Learni
 
 ```mermaid
 graph TD
-    Client["Enterprise Client App"] -->|POST /v1/chat/completions| Proxy["Guardian-AI Interception Engine"]
-    Proxy -->|1. Parse Payload| JSONFilter["JSON Interceptor (serde_json::Value)"]
-    JSONFilter -->|2. Regex Scan| RegexFilter["Tier 1: Regex Filter (OnceLock)"]
-    RegexFilter -->|3. NER Inference| MLFilter["Tier 2: NER ML Filter (tokio::task::spawn_blocking)"]
-    MLFilter -->|4. Map Offsets| Redactor["Co-Reference Redactor"]
-    Redactor -->|5. Rebuild JSON| Forwarder["Upstream Forwarder (Pooled reqwest::Client)"]
-    Forwarder -->|HTTP POST| Upstream["Upstream LLM API (UPSTREAM_URL)"]
-    Proxy -.->|"Other Endpoints: Transparent Pass-Through {*path}"| Forwarder
+    Client["AI Harness / Client App (Cursor, Claude Code, Copilot)"] -->|Outbound HTTPS Request| Proxy["Guardian-AI Interception Engine"]
+    Proxy -->|1. Parse Payload| Pipeline["4-Tier Cascading Detection Pipeline"]
+    Pipeline -->|Tier 1: Regex| T1["Pattern Matching"]
+    Pipeline -->|Tier 2: Entropy| T2["Contextual Entropy Analysis"]
+    Pipeline -->|Tier 3: NER| T3["Local Named Entity Recognition (Candle)"]
+    Pipeline -->|Tier 4: Classifier| T4["Contextual Classification (ORT)"]
+    T4 -->|2. Resolve Overlaps| Redactor["Co-Reference Redactor (TokenMap)"]
+    Redactor -->|3. Forward Redacted Payload| Upstream["Upstream LLM API (api.openai.com / api.anthropic.com)"]
+    Upstream -->|4. Inbound SSE Stream| StreamMutator["SSE Stream Mutator & Sink Detector"]
+    StreamMutator -->|5. Safe Re-injection & Local CA Response| Client
 ```
-
-### Invariants
-*   **Stateless Execution**: The proxy maintains no persistent cache or request logs on disk, permitting infinite horizontal scalability.
-*   **Single-Pass Text Mutation**: Spans are computed against the original string, resolved for overlaps, offset-adjusted, and replaced in a single final pass to avoid UTF-8 boundary slicing panics.
-*   **Host and Connection Re-writing**: Automatic removal of connection-specified hop-by-hop headers, recalculation of mutated payload `Content-Length`, and `Host` rewriting to ensure upstream handshake success.
 
 ---
 
-## 📁 Repository Structure
+## 📁 Repository & Workspace Structure
 
 ```text
 llm-firewall-rs/
 ├── crates/
-│   ├── guardian-core/   # Pure detection engine, regex/ML, co-ref state & token maps
-│   ├── guardian-proxy/  # Axum MITM proxy, streaming handlers & upstream client
-│   └── guardian-cli/    # CLI entrypoint, argument/env parsing, and server runtime
+│   ├── guardian-core/   # Pure detection engine (4 tiers), domain tuning, TokenMap & redaction
+│   ├── guardian-proxy/  # Axum MITM proxy, SSE stream mutator & upstream client
+│   └── guardian-cli/    # CLI entrypoint (llm-firewall on/scan/stats/report), CA manager, patcher
 ├── src/
-│   └── main.rs          # Root binary forwarder stub calling guardian-cli
+│   └── main.rs          # Workspace binary entrypoint forwarding to guardian-cli
 ├── docs/                # BMAD planning, architecture spines, specs & implementation stories
 ├── model/               # Local quantized NER model assets (safetensors & tokenizers)
 ├── scripts/
-│   └── setup_model.sh   # Downloads model safetensors and configurations locally
+│   └── setup_model.sh   # Downloads local model assets
 ├── AGENTS.md            # Agent guidelines and context hygiene rules
-└── Cargo.toml           # Multi-crate Cargo workspace configuration
+└── Cargo.toml           # Multi-crate Cargo workspace
 ```
 
 ---
@@ -69,15 +71,7 @@ llm-firewall-rs/
 ### Prerequisites
 
 *   **Rust Compiler**: `rustc 1.85.0` or newer.
-*   **CMake / C Compiler**: Required for compiling Hugging Face `candle` dependencies.
-
-### Environment Variables
-
-| Variable | Description | Default |
-| :--- | :--- | :--- |
-| `PORT` | Listening port for the proxy server | `3000` |
-| `UPSTREAM_URL` | Base URL of the upstream LLM API provider | `https://api.openai.com` |
-| `MODEL_DIR` | Local directory containing `.safetensors` model weights | `./model/` |
+*   **CMake / C Compiler**: Required for compiling `candle` and `ort` dependencies.
 
 ### Installation & Run
 
@@ -87,58 +81,41 @@ llm-firewall-rs/
     cd llm-firewall-rs
     ```
 
-2.  **Download the ML Model Assets**:
-    Download the quantized standard NER model assets (e.g. weights and tokenizer config) and save them to the model directory:
+2.  **Download ML Model Assets**:
     ```bash
     chmod +x scripts/setup_model.sh
     ./scripts/setup_model.sh
     ```
 
-3.  **Build and Run**:
+3.  **Run the CLI**:
     ```bash
-    cargo run --release
+    # Scan current repository for exposed secrets (First-run scare report)
+    cargo run -- scan
+
+    # Start the bidirectional proxy and auto-patch installed AI harnesses
+    cargo run -- on
+
+    # Run standalone proxy server
+    cargo run -- proxy --port 3000 --upstream https://api.openai.com
     ```
 
 ### Running Tests
 
-The test suite covers endpoints validation, port and upstream URL parsing logic, connection hop header stripping, and transparent proxy forwarding:
 ```bash
-cargo test
+cargo test --workspace
 ```
-
-### 🚀 Demo
-
-To see Guardian-AI's redaction in action locally:
-
-1. Make sure you have downloaded the ML model assets and started the server (`cargo run --release`).
-2. Open a new terminal and send a test request containing PII (like a phone number and email):
-
-```bash
-curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer YOUR_OPENAI_API_KEY" \
-  -d '{
-    "model": "gpt-3.5-turbo",
-    "messages": [
-      {
-        "role": "user",
-        "content": "My name is John Doe and my phone number is 555-123-4567. My email is john.doe@example.com."
-      }
-    ]
-  }'
-```
-*(Note: If you omit a valid API key, the proxy will still successfully intercept and redact the PII locally before OpenAI returns a `401 Unauthorized`. You can observe the successful redaction in the proxy terminal logs!)*
 
 ---
 
 ## 🔒 Security Policy
 
-Guardian-AI is built for strict environments:
 *   **Fail-Closed**: If any middleware, model runner, or regex evaluator panics or times out, the request is immediately halted with a generic `500 Internal Server Error`.
-*   **Zero Retention**: Prompt translations and replacement maps are short-lived stack allocations that disappear as soon as the request completes.
+*   **Zero Retention**: Prompt translations and replacement maps are short-lived request-scoped state that disappear as soon as the request completes.
+*   **Sink Quarantine**: Any prompt-injected attempt by an LLM to output secrets into executable or exfiltration contexts is quarantined.
 
 ---
 
 ## 📄 License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+

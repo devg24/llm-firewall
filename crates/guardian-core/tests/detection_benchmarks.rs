@@ -26,6 +26,7 @@ struct ExpectedSpan {
 /// Flattened item from domain-stratified datasets
 /// (dataset_standard.json / dataset_crypto.json / dataset_healthcare.json)
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct DomainItem {
     id: String,
     domain: String,
@@ -49,8 +50,11 @@ fn load_domain_dataset(domain: &str) -> Vec<DomainItem> {
         env!("CARGO_MANIFEST_DIR"),
         domain
     );
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("Missing domain dataset: {path}\nRun: python3 scripts/generate_benchmark_datasets.py"));
+    let content = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+        panic!(
+            "Missing domain dataset: {path}\nRun: python3 scripts/generate_benchmark_datasets.py"
+        )
+    });
     serde_json::from_str(&content).expect("Failed to parse domain dataset JSON")
 }
 
@@ -59,11 +63,7 @@ fn load_domain_dataset(domain: &str) -> Vec<DomainItem> {
 // ──────────────────────────────────────────────────────────────────────────────
 
 fn compute_metrics(tp: f32, fp: f32, fn_: f32) -> (f32, f32, f32) {
-    let precision = if tp + fp == 0.0 {
-        1.0
-    } else {
-        tp / (tp + fp)
-    };
+    let precision = if tp + fp == 0.0 { 1.0 } else { tp / (tp + fp) };
     let recall = if tp + fn_ == 0.0 {
         1.0
     } else {
@@ -199,13 +199,17 @@ fn benchmark_entropy_detector_accuracy() {
                 total_tp += 1.0;
             } else {
                 total_fn += 1.0;
-                eprintln!("Entropy missed high-entropy target [{}]: {}", item.id, item.text);
+                eprintln!(
+                    "Entropy missed high-entropy target [{}]: {}",
+                    item.id, item.text
+                );
             }
-        } else if is_false_positive_trap {
-            if !detected.is_empty() {
-                total_fp += detected.len() as f32;
-                eprintln!("Entropy triggered false positive on [{}]: {:?}", item.id, detected);
-            }
+        } else if is_false_positive_trap && !detected.is_empty() {
+            total_fp += detected.len() as f32;
+            eprintln!(
+                "Entropy triggered false positive on [{}]: {:?}",
+                item.id, detected
+            );
         }
     }
 
@@ -296,7 +300,11 @@ async fn benchmark_orchestrator_full_cascade() {
 #[test]
 fn benchmark_domain_standard_entropy_f1() {
     let items = load_domain_dataset("standard");
-    assert_eq!(items.len(), 10_000, "Expected 10,000 items in standard dataset");
+    assert_eq!(
+        items.len(),
+        10_000,
+        "Expected 10,000 items in standard dataset"
+    );
 
     let locked_threshold = DomainProfile::Standard.thresholds().entropy_tier as f64; // 3.84 bits
 
@@ -305,9 +313,13 @@ fn benchmark_domain_standard_entropy_f1() {
     let mut fn_ = 0.0f32;
     for item in &items {
         let predicted = item.entropy >= locked_threshold;
-        if predicted && item.is_secret { tp += 1.0; }
-        else if predicted && !item.is_secret { fp += 1.0; }
-        else if !predicted && item.is_secret { fn_ += 1.0; }
+        if predicted && item.is_secret {
+            tp += 1.0;
+        } else if predicted && !item.is_secret {
+            fp += 1.0;
+        } else if !predicted && item.is_secret {
+            fn_ += 1.0;
+        }
     }
     let (precision, recall, f1) = compute_metrics(tp, fp, fn_);
     println!(
@@ -343,7 +355,11 @@ fn benchmark_domain_standard_entropy_f1() {
 #[test]
 fn benchmark_domain_crypto_entropy_f1() {
     let items = load_domain_dataset("crypto");
-    assert_eq!(items.len(), 10_000, "Expected 10,000 items in crypto dataset");
+    assert_eq!(
+        items.len(),
+        10_000,
+        "Expected 10,000 items in crypto dataset"
+    );
 
     let locked_threshold = DomainProfile::CryptoFintech.thresholds().entropy_tier as f64; // 4.28 bits
 
@@ -352,9 +368,13 @@ fn benchmark_domain_crypto_entropy_f1() {
     let mut fn_ = 0.0f32;
     for item in &items {
         let predicted = item.entropy >= locked_threshold;
-        if predicted && item.is_secret { tp += 1.0; }
-        else if predicted && !item.is_secret { fp += 1.0; }
-        else if !predicted && item.is_secret { fn_ += 1.0; }
+        if predicted && item.is_secret {
+            tp += 1.0;
+        } else if predicted && !item.is_secret {
+            fp += 1.0;
+        } else if !predicted && item.is_secret {
+            fn_ += 1.0;
+        }
     }
     let (precision, recall, f1) = compute_metrics(tp, fp, fn_);
     println!(
@@ -389,7 +409,11 @@ fn benchmark_domain_crypto_entropy_f1() {
 #[test]
 fn benchmark_domain_healthcare_entropy_f1() {
     let items = load_domain_dataset("healthcare");
-    assert_eq!(items.len(), 10_000, "Expected 10,000 items in healthcare dataset");
+    assert_eq!(
+        items.len(),
+        10_000,
+        "Expected 10,000 items in healthcare dataset"
+    );
 
     let locked_threshold = DomainProfile::Healthcare.thresholds().entropy_tier as f64; // 4.16 bits
 
@@ -398,9 +422,13 @@ fn benchmark_domain_healthcare_entropy_f1() {
     let mut fn_ = 0.0f32;
     for item in &items {
         let predicted = item.entropy >= locked_threshold;
-        if predicted && item.is_secret { tp += 1.0; }
-        else if predicted && !item.is_secret { fp += 1.0; }
-        else if !predicted && item.is_secret { fn_ += 1.0; }
+        if predicted && item.is_secret {
+            tp += 1.0;
+        } else if predicted && !item.is_secret {
+            fp += 1.0;
+        } else if !predicted && item.is_secret {
+            fn_ += 1.0;
+        }
     }
     let (precision, recall, f1) = compute_metrics(tp, fp, fn_);
     println!(

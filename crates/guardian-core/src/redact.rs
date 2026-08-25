@@ -171,6 +171,7 @@ pub enum PiiType {
     Bearer,
     HighEntropy,
     Person,
+    Custom,
     Unknown,
 }
 
@@ -188,6 +189,7 @@ impl PiiType {
             PiiType::Bearer => "BEARER",
             PiiType::HighEntropy => "HIGH_ENTROPY",
             PiiType::Person => "PERSON",
+            PiiType::Custom => "CUSTOM",
             PiiType::Unknown => "UNKNOWN",
         }
     }
@@ -391,6 +393,95 @@ pub fn redact_text(
     }
 
     redacted
+}
+
+pub async fn process_completions_payload_with_orchestrator(
+    payload: &mut serde_json::Value,
+    token_map: &std::sync::Arc<std::sync::Mutex<crate::token_map::TokenMap>>,
+    orchestrator: &crate::orchestrator::DetectionOrchestrator,
+) -> Result<(), crate::CoreError> {
+    let messages = payload
+        .get_mut("messages")
+        .and_then(|m| m.as_array_mut())
+        .ok_or_else(|| {
+            crate::CoreError::PayloadValidation("Missing or invalid 'messages' array".to_string())
+        })?;
+
+    for message in messages {
+        if let Some(content) = message.get_mut("content") {
+            mutate_content_field_with_orchestrator(content, token_map, orchestrator, 0).await;
+        }
+    }
+
+    Ok(())
+}
+
+use futures_util::future::BoxFuture;
+use futures_util::FutureExt;
+
+pub fn mutate_content_field_with_orchestrator<'a>(
+    content: &'a mut serde_json::Value,
+    token_map: &'a std::sync::Arc<std::sync::Mutex<crate::token_map::TokenMap>>,
+    orchestrator: &'a crate::orchestrator::DetectionOrchestrator,
+    depth: usize,
+) -> BoxFuture<'a, ()> {
+    async move {
+        if depth > 100 {
+            return;
+        }
+        match content {
+            serde_json::Value::String(s) => {
+                let text = s.clone();
+                if let Ok(mut spans) = orchestrator.orchestrate(&text).await {
+                    if !spans.is_empty() {
+                        spans.sort_by_key(|span| span.start);
+                        let mut redacted = text.clone();
+                        let mut offset: isize = 0;
+                        let mut counters = std::collections::HashMap::new();
+
+                        for span in spans {
+                            let actual_start = (span.start as isize + offset) as usize;
+                            let actual_end = (span.end as isize + offset) as usize;
+
+                            if actual_start > redacted.len() || actual_end > redacted.len() {
+                                continue;
+                            }
+
+                            let secret = redacted[actual_start..actual_end].to_string();
+                            let pii_type = span.label;
+
+                            let count = counters.entry(pii_type).or_insert(1);
+                            let token = format!("[REDACTED_{}_{}]", pii_type.as_str(), count);
+                            *count += 1;
+
+                            {
+                                let mut lock = token_map.lock().unwrap();
+                                lock.insert(token.clone(), secret.clone(), pii_type);
+                            };
+
+                            redacted.replace_range(actual_start..actual_end, &token);
+                            offset += token.len() as isize - (actual_end - actual_start) as isize;
+                        }
+                        *s = redacted;
+                    }
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for v in arr {
+                    mutate_content_field_with_orchestrator(v, token_map, orchestrator, depth + 1)
+                        .await;
+                }
+            }
+            serde_json::Value::Object(obj) => {
+                for v in obj.values_mut() {
+                    mutate_content_field_with_orchestrator(v, token_map, orchestrator, depth + 1)
+                        .await;
+                }
+            }
+            _ => {}
+        }
+    }
+    .boxed()
 }
 
 #[cfg(test)]
@@ -664,93 +755,4 @@ mod tests {
             "Same phone: [REDACTED_PHONE_1] and name John Doe [REDACTED_SSN_1]"
         );
     }
-}
-
-pub async fn process_completions_payload_with_orchestrator(
-    payload: &mut serde_json::Value,
-    token_map: &std::sync::Arc<std::sync::Mutex<crate::token_map::TokenMap>>,
-    orchestrator: &crate::orchestrator::DetectionOrchestrator,
-) -> Result<(), crate::CoreError> {
-    let messages = payload
-        .get_mut("messages")
-        .and_then(|m| m.as_array_mut())
-        .ok_or_else(|| {
-            crate::CoreError::PayloadValidation("Missing or invalid 'messages' array".to_string())
-        })?;
-
-    for message in messages {
-        if let Some(content) = message.get_mut("content") {
-            mutate_content_field_with_orchestrator(content, token_map, orchestrator, 0).await;
-        }
-    }
-
-    Ok(())
-}
-
-use futures_util::future::BoxFuture;
-use futures_util::FutureExt;
-
-pub fn mutate_content_field_with_orchestrator<'a>(
-    content: &'a mut serde_json::Value,
-    token_map: &'a std::sync::Arc<std::sync::Mutex<crate::token_map::TokenMap>>,
-    orchestrator: &'a crate::orchestrator::DetectionOrchestrator,
-    depth: usize,
-) -> BoxFuture<'a, ()> {
-    async move {
-        if depth > 100 {
-            return;
-        }
-        match content {
-            serde_json::Value::String(s) => {
-                let text = s.clone();
-                if let Ok(mut spans) = orchestrator.orchestrate(&text).await {
-                    if !spans.is_empty() {
-                        spans.sort_by_key(|span| span.start);
-                        let mut redacted = text.clone();
-                        let mut offset: isize = 0;
-                        let mut counters = std::collections::HashMap::new();
-
-                        for span in spans {
-                            let actual_start = (span.start as isize + offset) as usize;
-                            let actual_end = (span.end as isize + offset) as usize;
-
-                            if actual_start > redacted.len() || actual_end > redacted.len() {
-                                continue;
-                            }
-
-                            let secret = redacted[actual_start..actual_end].to_string();
-                            let pii_type = span.label;
-
-                            let count = counters.entry(pii_type).or_insert(1);
-                            let token = format!("[REDACTED_{}_{}]", pii_type.as_str(), count);
-                            *count += 1;
-
-                            {
-                                let mut lock = token_map.lock().unwrap();
-                                lock.insert(token.clone(), secret.clone(), pii_type);
-                            };
-
-                            redacted.replace_range(actual_start..actual_end, &token);
-                            offset += token.len() as isize - (actual_end - actual_start) as isize;
-                        }
-                        *s = redacted;
-                    }
-                }
-            }
-            serde_json::Value::Array(arr) => {
-                for v in arr {
-                    mutate_content_field_with_orchestrator(v, token_map, orchestrator, depth + 1)
-                        .await;
-                }
-            }
-            serde_json::Value::Object(obj) => {
-                for v in obj.values_mut() {
-                    mutate_content_field_with_orchestrator(v, token_map, orchestrator, depth + 1)
-                        .await;
-                }
-            }
-            _ => {}
-        }
-    }
-    .boxed()
 }

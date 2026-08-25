@@ -395,7 +395,11 @@ pub async fn chat_completions_handler(
     let token_map_arc = Arc::new(std::sync::Mutex::new(TokenMap::new()));
 
     // Run Orchestrator Pipeline
-    let orchestrator = guardian_core::orchestrator::DetectionOrchestrator::new(state.model.clone());
+    let orchestrator = guardian_core::orchestrator::DetectionOrchestrator::with_config(
+        state.model.clone(),
+        state.domain,
+        state.guardian_config.as_ref(),
+    );
     guardian_core::redact::process_completions_payload_with_orchestrator(
         &mut payload,
         &token_map_arc,

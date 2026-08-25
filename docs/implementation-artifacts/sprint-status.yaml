@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-19T17:02:00+05:30
-last_updated: 2026-08-20T18:09:00+05:30
+last_updated: 2026-08-25T17:08:00+05:30
 project: llm-firewall-rs
 project_key: NOKEY
 tracking_system: file-system
@@ -64,9 +64,9 @@ development_status:
   3-3-context-aware-sink-blocking: done
   3-4-advanced-detection-pipeline: done
   epic-3-retrospective: done
-  epic-4: backlog
-  4-1-auto-detect-project-domain-from-manifests: backlog
-  4-2-power-user-guardian-toml-configuration: backlog
+  epic-4: done
+  4-1-auto-detect-project-domain-from-manifests: done
+  4-2-power-user-guardian-toml-configuration: done
   epic-4-retrospective: optional
   epic-5: backlog
   5-1-pre-flight-security-plan-generation: backlog

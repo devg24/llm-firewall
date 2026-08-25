@@ -46,6 +46,8 @@ fn make_state(upstream_addr: std::net::SocketAddr) -> AppState {
             .parse::<reqwest::Url>()
             .unwrap(),
         model: None,
+        domain: guardian_core::DomainProfile::Standard,
+        guardian_config: None,
     }
 }
 

@@ -106,7 +106,9 @@ impl Detector for EntropyDetector {
                     let mut end = i + self.window_size;
                     while end < chars.len() {
                         let next_char = chars[end];
-                        if !next_char.is_whitespace() && (next_char.is_alphanumeric() || "+/=_-!@#$%^&*".contains(next_char)) {
+                        if !next_char.is_whitespace()
+                            && (next_char.is_alphanumeric() || "+/=_-!@#$%^&*".contains(next_char))
+                        {
                             end += 1;
                         } else {
                             break;

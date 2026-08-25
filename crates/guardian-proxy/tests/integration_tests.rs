@@ -32,6 +32,8 @@ async fn test_health_endpoint() {
         client,
         upstream_url,
         model: None,
+        domain: guardian_core::DomainProfile::Standard,
+        guardian_config: None,
     };
 
     let app = create_app(state);
@@ -122,6 +124,8 @@ async fn test_proxy_transparent_fallback() {
         client,
         upstream_url,
         model: None,
+        domain: guardian_core::DomainProfile::Standard,
+        guardian_config: None,
     };
 
     let proxy_app = create_app(state);
@@ -270,6 +274,8 @@ async fn test_proxy_chat_completions_success() {
         client,
         upstream_url,
         model: None,
+        domain: guardian_core::DomainProfile::Standard,
+        guardian_config: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -358,6 +364,8 @@ async fn test_proxy_chat_completions_complex() {
         client,
         upstream_url,
         model: None,
+        domain: guardian_core::DomainProfile::Standard,
+        guardian_config: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -443,6 +451,8 @@ async fn test_proxy_chat_completions_too_large() {
         client,
         upstream_url,
         model: None,
+        domain: guardian_core::DomainProfile::Standard,
+        guardian_config: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -482,6 +492,8 @@ async fn test_proxy_chat_completions_fail_closed() {
         client,
         upstream_url,
         model: None,
+        domain: guardian_core::DomainProfile::Standard,
+        guardian_config: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -535,4 +547,225 @@ async fn test_proxy_chat_completions_fail_closed() {
 
     let _ = tx.send(());
     server_handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_proxy_domain_crypto_entropy_and_tier1_redaction() {
+    // 1. Spawn echo upstream server
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+
+    let (tx_upstream, rx_upstream) = tokio::sync::oneshot::channel::<()>();
+    let upstream_handle = tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(|body: axum::body::Bytes| async move {
+                let body_str = String::from_utf8_lossy(&body);
+                axum::Json(serde_json::json!({
+                    "id": "chatcmpl-echo",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": format!("Echo: {}", body_str)
+                        }
+                    }]
+                }))
+            }),
+        );
+        axum::serve(upstream_listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx_upstream.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    // 2. Spawn proxy server with CryptoFintech domain profile
+    let client = make_test_client();
+    let upstream_url = reqwest::Url::parse(&format!("http://{}", upstream_addr)).unwrap();
+    let state = AppState {
+        client,
+        upstream_url,
+        model: None,
+        domain: guardian_core::DomainProfile::CryptoFintech,
+        guardian_config: None,
+    };
+    let proxy_app = create_app(state);
+    let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+
+    let (tx_proxy, rx_proxy) = tokio::sync::oneshot::channel::<()>();
+    let proxy_handle = tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app)
+            .with_graceful_shutdown(async move {
+                let _ = rx_proxy.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    // 3. Send payload containing both Ethereum hex address and AWS Secret Access Key
+    let client = make_test_client();
+    let payload = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [
+            {
+                "role": "user",
+                "content": "Verify contract at 0x71C84513610A711045E8383281B971C6Db7E7AC9 using AWS AKIAIOSFODNN7EXAMPLE"
+            }
+        ]
+    });
+
+    let response = client
+        .post(format!("http://{}/v1/chat/completions", proxy_addr))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let response_json: serde_json::Value = response.json().await.unwrap();
+    let echoed_content = response_json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap();
+
+    let sent_to_upstream: serde_json::Value =
+        serde_json::from_str(echoed_content.strip_prefix("Echo: ").unwrap()).unwrap();
+
+    let msg_text = sent_to_upstream["messages"][1]["content"].as_str().unwrap();
+
+    // Ethereum address must NOT be redacted (high entropy threshold avoids FP)
+    assert!(msg_text.contains("0x71C84513610A711045E8383281B971C6Db7E7AC9"));
+    // AWS Key MUST be redacted by Tier 1 deterministic regex
+    assert!(msg_text.contains("[REDACTED_AWS_"));
+    assert!(!msg_text.contains("AKIAIOSFODNN7EXAMPLE"));
+
+    let _ = tx_proxy.send(());
+    let _ = tx_upstream.send(());
+    proxy_handle.await.unwrap();
+    upstream_handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_proxy_power_user_guardian_toml_custom_rules_and_allowlist() {
+    // 1. Spawn echo upstream server
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+
+    let (tx_upstream, rx_upstream) = tokio::sync::oneshot::channel::<()>();
+    let upstream_handle = tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(|body: axum::body::Bytes| async move {
+                let body_str = String::from_utf8_lossy(&body);
+                axum::Json(serde_json::json!({
+                    "id": "chatcmpl-echo",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": format!("Echo: {}", body_str)
+                        }
+                    }]
+                }))
+            }),
+        );
+        axum::serve(upstream_listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx_upstream.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    // 2. Parse custom GuardianConfig with custom regex rule and allowlist
+    let custom_toml = r#"
+    domain = "standard"
+
+    [[rules]]
+    id = "internal_token"
+    pattern = "INT-[0-9]{6}"
+    pii_type = "CUSTOM"
+
+    [allowlist]
+    terms = ["SAFE_DEBUG_TOKEN_12345"]
+    patterns = ["ALLOWED_[A-Za-z0-9_]+"]
+    "#;
+
+    let guardian_config = guardian_core::manifest::parse_guardian_toml_str(custom_toml);
+    assert!(guardian_config.is_some());
+
+    // 3. Spawn proxy server with this GuardianConfig
+    let client = make_test_client();
+    let upstream_url = reqwest::Url::parse(&format!("http://{}", upstream_addr)).unwrap();
+    let state = AppState {
+        client,
+        upstream_url,
+        model: None,
+        domain: guardian_core::DomainProfile::Standard,
+        guardian_config,
+    };
+    let proxy_app = create_app(state);
+    let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+
+    let (tx_proxy, rx_proxy) = tokio::sync::oneshot::channel::<()>();
+    let proxy_handle = tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app)
+            .with_graceful_shutdown(async move {
+                let _ = rx_proxy.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    // 4. Send payload with:
+    // - Custom token INT-998877 (should be redacted)
+    // - Allowlisted exact term SAFE_DEBUG_TOKEN_12345 (should bypass)
+    // - Allowlisted regex pattern ALLOWED_HEX_9876543210 (should bypass)
+    // - Standard SSN 123-45-6789 (should be redacted)
+    let client = make_test_client();
+    let payload = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [
+            {
+                "role": "user",
+                "content": "Secret INT-998877 with allowlist SAFE_DEBUG_TOKEN_12345 and ALLOWED_HEX_9876543210 plus SSN 123-45-6789"
+            }
+        ]
+    });
+
+    let response = client
+        .post(format!("http://{}/v1/chat/completions", proxy_addr))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let response_json: serde_json::Value = response.json().await.unwrap();
+    let echoed_content = response_json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap();
+
+    let sent_to_upstream: serde_json::Value =
+        serde_json::from_str(echoed_content.strip_prefix("Echo: ").unwrap()).unwrap();
+
+    let msg_text = sent_to_upstream["messages"][1]["content"].as_str().unwrap();
+
+    // Custom rule INT-998877 was redacted
+    assert!(msg_text.contains("[REDACTED_CUSTOM_"));
+    assert!(!msg_text.contains("INT-998877"));
+
+    // Standard SSN was redacted
+    assert!(msg_text.contains("[REDACTED_SSN_"));
+    assert!(!msg_text.contains("123-45-6789"));
+
+    // Allowlisted terms bypassed redaction
+    assert!(msg_text.contains("SAFE_DEBUG_TOKEN_12345"));
+    assert!(msg_text.contains("ALLOWED_HEX_9876543210"));
+
+    let _ = tx_proxy.send(());
+    let _ = tx_upstream.send(());
+    proxy_handle.await.unwrap();
+    upstream_handle.await.unwrap();
 }
