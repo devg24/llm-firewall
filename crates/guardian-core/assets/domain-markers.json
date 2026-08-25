@@ -1,0 +1,28 @@
+{
+  "crypto": [
+    "ethers",
+    "solana",
+    "web3",
+    "alloy",
+    "bitcoin",
+    "alloy-primitives",
+    "@solana/web3.js",
+    "viem",
+    "wagmi",
+    "web3.py",
+    "eth-account",
+    "bip39",
+    "secp256k1",
+    "go-ethereum"
+  ],
+  "healthcare": [
+    "fhir",
+    "hl7",
+    "medplum",
+    "bonfhir",
+    "dicom",
+    "python-hl7",
+    "fhirclient",
+    "healthgorilla"
+  ]
+}

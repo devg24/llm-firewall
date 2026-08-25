@@ -709,8 +709,13 @@ fn process_sse_event(
                         );
                         full_content_to_replace
                     } else {
-                        let ac = aho_corasick::AhoCorasick::new(&tokens).unwrap();
-                        ac.replace_all(&full_content_to_replace, &original_values)
+                        match aho_corasick::AhoCorasick::new(&tokens) {
+                            Ok(ac) => ac.replace_all(&full_content_to_replace, &original_values),
+                            Err(e) => {
+                                tracing::error!(error = %e, "Failed to build AhoCorasick automaton for token re-injection");
+                                full_content_to_replace
+                            }
+                        }
                     }
                 } else {
                     full_content_to_replace

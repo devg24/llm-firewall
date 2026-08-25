@@ -1,4 +1,6 @@
+pub mod config;
 pub mod detect;
+pub mod discovery;
 pub mod domain;
 pub mod error;
 pub mod manifest;

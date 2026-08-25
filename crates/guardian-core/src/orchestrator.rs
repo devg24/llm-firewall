@@ -66,8 +66,8 @@ impl DetectionOrchestrator {
 
             let compile_regex = |pattern: &str| -> Result<regex::Regex, regex::Error> {
                 regex::RegexBuilder::new(pattern)
-                    .size_limit(10 * 1024 * 1024)
-                    .dfa_size_limit(2 * 1024 * 1024)
+                    .size_limit(crate::config::MAX_REGEX_AST_SIZE)
+                    .dfa_size_limit(crate::config::MAX_REGEX_DFA_SIZE)
                     .build()
             };
 
