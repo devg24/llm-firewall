@@ -1,4 +1,4 @@
 #[tokio::main]
 async fn main() {
-    guardian_cli::run_server().await;
+    guardian_cli::run_cli().await;
 }

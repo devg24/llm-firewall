@@ -317,6 +317,82 @@ pub async fn run_server_with_trust() {
     run_server_internal().await;
 }
 
+/// Main CLI entrypoint that parses command-line arguments and dispatches subcommands.
+pub async fn run_cli() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "scan" => {
+                let config = scanner::ScannerConfig::default();
+                let findings = scanner::run_scan(&config).await;
+                scanner::print_report(&findings);
+                return;
+            }
+            "preflight" => {
+                let preflight_args = preflight::parse_preflight_args(&args[2..])
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    });
+                if let Err(e) = preflight::run_preflight(preflight_args).await {
+                    eprintln!("Preflight failed: {}", e);
+                    std::process::exit(1);
+                }
+                return;
+            }
+            "stats" => {
+                let stats_args =
+                    stats::parse_stats_args(&args[2..]).unwrap_or_else(|e| {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    });
+                if let Err(e) = stats::run_stats(stats_args) {
+                    eprintln!("Stats error: {}", e);
+                    std::process::exit(1);
+                }
+                return;
+            }
+            "report" => {
+                let report_args = report::parse_report_args(&args[2..])
+                    .unwrap_or_else(|e| {
+                        eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    });
+                if let Err(e) = report::run_report(report_args) {
+                    eprintln!("Report error: {}", e);
+                    std::process::exit(1);
+                }
+                return;
+            }
+            "on" => {
+                run_server_with_trust().await;
+                return;
+            }
+            "--help" | "-h" => {
+                println!("LLM Firewall — Security & Compliance Proxy for Local LLMs");
+                println!();
+                println!("USAGE:");
+                println!("    llm-firewall [COMMAND] [OPTIONS]");
+                println!();
+                println!("COMMANDS:");
+                println!("    scan                  Scan repository for unprotected secrets and sensitive files");
+                println!("    on                    Start transparent MITM proxy with automatic CA installation");
+                println!("    preflight             Generate or approve an unattended pre-flight security plan");
+                println!("    stats                 Display aggregate security metrics and estimated risk avoided");
+                println!("    report                Generate SOC 2 / HIPAA / GDPR compliance audit reports");
+                println!("    [default]             Start standard proxy server");
+                println!();
+                println!("OPTIONS:");
+                println!("    -h, --help            Print help information");
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    run_server().await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
