@@ -34,6 +34,8 @@ async fn test_health_endpoint() {
         model: None,
         domain: guardian_core::DomainProfile::Standard,
         guardian_config: None,
+        preflight_plan: None,
+        telemetry_tx: None,
     };
 
     let app = create_app(state);
@@ -126,6 +128,8 @@ async fn test_proxy_transparent_fallback() {
         model: None,
         domain: guardian_core::DomainProfile::Standard,
         guardian_config: None,
+        preflight_plan: None,
+        telemetry_tx: None,
     };
 
     let proxy_app = create_app(state);
@@ -276,6 +280,8 @@ async fn test_proxy_chat_completions_success() {
         model: None,
         domain: guardian_core::DomainProfile::Standard,
         guardian_config: None,
+        preflight_plan: None,
+        telemetry_tx: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -366,6 +372,8 @@ async fn test_proxy_chat_completions_complex() {
         model: None,
         domain: guardian_core::DomainProfile::Standard,
         guardian_config: None,
+        preflight_plan: None,
+        telemetry_tx: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -453,6 +461,8 @@ async fn test_proxy_chat_completions_too_large() {
         model: None,
         domain: guardian_core::DomainProfile::Standard,
         guardian_config: None,
+        preflight_plan: None,
+        telemetry_tx: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -494,6 +504,8 @@ async fn test_proxy_chat_completions_fail_closed() {
         model: None,
         domain: guardian_core::DomainProfile::Standard,
         guardian_config: None,
+        preflight_plan: None,
+        telemetry_tx: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -589,6 +601,8 @@ async fn test_proxy_domain_crypto_entropy_and_tier1_redaction() {
         model: None,
         domain: guardian_core::DomainProfile::CryptoFintech,
         guardian_config: None,
+        preflight_plan: None,
+        telemetry_tx: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -703,6 +717,8 @@ async fn test_proxy_power_user_guardian_toml_custom_rules_and_allowlist() {
         model: None,
         domain: guardian_core::DomainProfile::Standard,
         guardian_config,
+        preflight_plan: None,
+        telemetry_tx: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -768,4 +784,417 @@ async fn test_proxy_power_user_guardian_toml_custom_rules_and_allowlist() {
     let _ = tx_upstream.send(());
     proxy_handle.await.unwrap();
     upstream_handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_proxy_with_approved_preflight_plan() {
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+
+    let (tx_upstream, rx_upstream) = tokio::sync::oneshot::channel::<()>();
+    let upstream_handle = tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(|body: axum::body::Bytes| async move {
+                let body_str = String::from_utf8_lossy(&body);
+                axum::Json(serde_json::json!({
+                    "id": "chatcmpl-plan",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": format!("Echo: {}", body_str)
+                        }
+                    }]
+                }))
+            }),
+        );
+        axum::serve(upstream_listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx_upstream.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let workspace_root = std::fs::canonicalize(workspace_dir.path()).unwrap();
+
+    let plan = guardian_core::plan::PreflightPlan {
+        version: 1,
+        workspace_root: workspace_root.clone(),
+        created_at: 1700000000,
+        sensitive_zones: vec![guardian_core::plan::SensitiveZone {
+            relative_path: std::path::PathBuf::from(".env"),
+            secret_types: vec![guardian_core::PiiType::Aws],
+            match_count: 1,
+            strategy: guardian_core::plan::ZoneStrategy::Redact,
+        }],
+        sandbox: guardian_core::plan::SandboxPolicy {
+            root: workspace_root.clone(),
+            enforce_jailing: true,
+            allow_subpaths: vec![],
+        },
+        approved: true,
+    };
+
+    let client = make_test_client();
+    let upstream_url = reqwest::Url::parse(&format!("http://{}", upstream_addr)).unwrap();
+    let state = AppState {
+        client,
+        upstream_url,
+        model: None,
+        domain: guardian_core::DomainProfile::Standard,
+        guardian_config: None,
+        preflight_plan: Some(std::sync::Arc::new(plan)),
+        telemetry_tx: None,
+    };
+    let proxy_app = create_app(state);
+    let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+
+    let (tx_proxy, rx_proxy) = tokio::sync::oneshot::channel::<()>();
+    let proxy_handle = tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app)
+            .with_graceful_shutdown(async move {
+                let _ = rx_proxy.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    let client = make_test_client();
+    let valid_file = workspace_root.join("src/main.rs");
+    let payload = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [
+            {
+                "role": "user",
+                "content": format!("Read file {} with AWS key AKIAIOSFODNN7EXAMPLE", valid_file.display())
+            }
+        ]
+    });
+
+    let response = client
+        .post(format!("http://{}/v1/chat/completions", proxy_addr))
+        .json(&payload)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let response_json: serde_json::Value = response.json().await.unwrap();
+    let echoed = response_json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap();
+    assert!(echoed.contains("[REDACTED_AWS_"));
+    assert!(!echoed.contains("AKIAIOSFODNN7EXAMPLE"));
+
+    let _ = tx_proxy.send(());
+    let _ = tx_upstream.send(());
+    proxy_handle.await.unwrap();
+    upstream_handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_proxy_preflight_plan_sandbox_blocking() {
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+
+    let (tx_upstream, rx_upstream) = tokio::sync::oneshot::channel::<()>();
+    let upstream_handle = tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(|| async { axum::Json(serde_json::json!({"ok": true})) }),
+        );
+        axum::serve(upstream_listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx_upstream.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let workspace_root = std::fs::canonicalize(workspace_dir.path()).unwrap();
+
+    let plan = guardian_core::plan::PreflightPlan {
+        version: 1,
+        workspace_root: workspace_root.clone(),
+        created_at: 1700000000,
+        sensitive_zones: vec![],
+        sandbox: guardian_core::plan::SandboxPolicy {
+            root: workspace_root,
+            enforce_jailing: true,
+            allow_subpaths: vec![],
+        },
+        approved: true,
+    };
+
+    let client = make_test_client();
+    let upstream_url = reqwest::Url::parse(&format!("http://{}", upstream_addr)).unwrap();
+    let state = AppState {
+        client,
+        upstream_url,
+        model: None,
+        domain: guardian_core::DomainProfile::Standard,
+        guardian_config: None,
+        preflight_plan: Some(std::sync::Arc::new(plan)),
+        telemetry_tx: None,
+    };
+    let proxy_app = create_app(state);
+    let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+
+    let (tx_proxy, rx_proxy) = tokio::sync::oneshot::channel::<()>();
+    let proxy_handle = tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app)
+            .with_graceful_shutdown(async move {
+                let _ = rx_proxy.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    let client = make_test_client();
+
+    // 1. Test directory traversal in tool_calls arguments
+    let payload_traversal = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [
+            {
+                "role": "user",
+                "content": "Inspect this"
+            },
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": "{\"path\": \"../../etc/passwd\"}"
+                    }
+                }]
+            }
+        ]
+    });
+
+    let response = client
+        .post(format!("http://{}/v1/chat/completions", proxy_addr))
+        .json(&payload_traversal)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::FORBIDDEN);
+    let body: serde_json::Value = response.json().await.unwrap();
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .contains("outside workspace boundary")
+            || body["error"] == "Forbidden"
+    );
+
+    let _ = tx_proxy.send(());
+    let _ = tx_upstream.send(());
+    proxy_handle.await.unwrap();
+    upstream_handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_telemetry_event_logging_through_proxy() {
+    // 1. Spawn echo upstream server
+    let upstream_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_addr = upstream_listener.local_addr().unwrap();
+
+    let (tx_upstream, rx_upstream) = tokio::sync::oneshot::channel::<()>();
+    let upstream_handle = tokio::spawn(async move {
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(|body: axum::body::Bytes| async move {
+                let body_str = String::from_utf8_lossy(&body);
+                axum::Json(serde_json::json!({
+                    "id": "chatcmpl-telemetry",
+                    "choices": [{
+                        "message": {
+                            "role": "assistant",
+                            "content": format!("Echo: {}", body_str)
+                        }
+                    }]
+                }))
+            }),
+        );
+        axum::serve(upstream_listener, app)
+            .with_graceful_shutdown(async move {
+                let _ = rx_upstream.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    // 2. Setup temporary audit log file and telemetry background writer
+    let temp_log = tempfile::NamedTempFile::new().unwrap();
+    let log_path = temp_log.path().to_path_buf();
+    let (telemetry_tx, telemetry_writer) =
+        guardian_core::telemetry::TelemetryWriter::new(log_path.clone());
+
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let workspace_root = std::fs::canonicalize(workspace_dir.path()).unwrap();
+
+    let plan = guardian_core::plan::PreflightPlan {
+        version: 1,
+        workspace_root: workspace_root.clone(),
+        created_at: 1700000000,
+        sensitive_zones: vec![],
+        sandbox: guardian_core::plan::SandboxPolicy {
+            root: workspace_root.clone(),
+            enforce_jailing: true,
+            allow_subpaths: vec![],
+        },
+        approved: true,
+    };
+
+    // 3. Spawn proxy with telemetry enabled
+    let client = make_test_client();
+    let upstream_url = reqwest::Url::parse(&format!("http://{}", upstream_addr)).unwrap();
+    let state = AppState {
+        client,
+        upstream_url,
+        model: None,
+        domain: guardian_core::DomainProfile::Standard,
+        guardian_config: None,
+        preflight_plan: Some(std::sync::Arc::new(plan)),
+        telemetry_tx: Some(telemetry_tx.clone()),
+    };
+
+    let proxy_app = create_app(state);
+    let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = proxy_listener.local_addr().unwrap();
+
+    let (tx_proxy, rx_proxy) = tokio::sync::oneshot::channel::<()>();
+    let proxy_handle = tokio::spawn(async move {
+        axum::serve(proxy_listener, proxy_app)
+            .with_graceful_shutdown(async move {
+                let _ = rx_proxy.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    let test_client = make_test_client();
+
+    // Request 1: Redaction of AWS Key (PiiIntercepted event)
+    let payload_redact = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [
+            {
+                "role": "user",
+                "content": "Deploy using key AKIAIOSFODNN7EXAMPLE"
+            }
+        ]
+    });
+    let res1 = test_client
+        .post(format!("http://{}/v1/chat/completions", proxy_addr))
+        .header("x-request-id", "req-test-pii-1")
+        .json(&payload_redact)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res1.status(), reqwest::StatusCode::OK);
+
+    // Request 2: Sandbox boundary traversal violation (SandboxBlocked event)
+    let payload_violation = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [
+            {
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "read_file",
+                        "arguments": "{\"path\": \"../../etc/shadow\"}"
+                    }
+                }]
+            }
+        ]
+    });
+    let res2 = test_client
+        .post(format!("http://{}/v1/chat/completions", proxy_addr))
+        .header("x-request-id", "req-test-sandbox-2")
+        .json(&payload_violation)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res2.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Request 3: Clean passthrough request (Passthrough event)
+    let payload_clean = serde_json::json!({
+        "model": "gpt-4o",
+        "messages": [
+            {
+                "role": "user",
+                "content": "Hello, write a rust function to add two numbers."
+            }
+        ]
+    });
+    let res3 = test_client
+        .post(format!("http://{}/v1/chat/completions", proxy_addr))
+        .header("x-request-id", "req-test-clean-3")
+        .json(&payload_clean)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res3.status(), reqwest::StatusCode::OK);
+
+    // Shutdown proxy and upstream servers
+    let _ = tx_proxy.send(());
+    let _ = tx_upstream.send(());
+    proxy_handle.await.unwrap();
+    upstream_handle.await.unwrap();
+
+    // Drop sender to allow background telemetry writer to flush and terminate
+    drop(telemetry_tx);
+    telemetry_writer.handle.await.unwrap();
+
+    // 4. Verify recorded telemetry events from log
+    let events = guardian_core::telemetry::load_telemetry_events(&log_path, None).unwrap();
+    assert_eq!(events.len(), 3);
+
+    assert_eq!(events[0].request_id, "req-test-pii-1");
+    assert_eq!(
+        events[0].event_type,
+        guardian_core::telemetry::TelemetryEventType::PiiIntercepted
+    );
+    assert_eq!(events[0].redacted_count, 1);
+    assert!(events[0].estimated_cost_saved_usd >= 1000.0);
+
+    assert_eq!(events[1].request_id, "req-test-sandbox-2");
+    assert_eq!(
+        events[1].event_type,
+        guardian_core::telemetry::TelemetryEventType::SandboxBlocked
+    );
+    assert!(events[1].sandbox_violation.is_some());
+
+    assert_eq!(events[2].request_id, "req-test-clean-3");
+    assert_eq!(
+        events[2].event_type,
+        guardian_core::telemetry::TelemetryEventType::Passthrough
+    );
+
+    // 5. Verify aggregated statistics
+    let stats = guardian_core::telemetry::compute_stats(&events, None);
+    assert_eq!(stats.total_requests, 3);
+    assert_eq!(stats.total_secrets_redacted, 1);
+    assert_eq!(stats.sandbox_violations_blocked, 1);
+    assert_eq!(stats.passthrough_requests, 1);
+    assert!(stats.total_estimated_cost_saved >= 2500.0);
+
+    // 6. Verify report generation
+    let md_report =
+        guardian_core::report::generate_markdown_report(&stats, &events, true, Some(&log_path));
+    assert!(md_report.contains("LLM Firewall — Compliance & Security Audit Report"));
+    assert!(md_report.contains("req-test-pii-1"));
+    assert!(md_report.contains("req-test-sandbox-2"));
 }

@@ -12,7 +12,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 pub mod ca;
 pub mod patcher;
+pub mod preflight;
+pub mod report;
 pub mod scanner;
+pub mod stats;
 /// Initializes stdout logging with an `EnvFilter` defaulting to `"info"`.
 pub fn init_logging() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -184,12 +187,43 @@ async fn run_server_internal() {
         "Active project domain profile"
     );
 
+    let preflight_plan_path = cwd.join(".guardian-plan.json");
+    let preflight_plan = match guardian_core::plan::PreflightPlan::load_from_file(
+        &preflight_plan_path,
+    ) {
+        Ok(Some(plan)) if plan.approved => {
+            tracing::info!(
+                version = plan.version,
+                zones = plan.sensitive_zones.len(),
+                "Loaded active pre-flight security plan (.guardian-plan.json)"
+            );
+            Some(std::sync::Arc::new(plan))
+        }
+        Ok(Some(_)) => {
+            tracing::warn!(
+                ".guardian-plan.json exists but is not approved. Operating without preflight plan."
+            );
+            None
+        }
+        Ok(None) => None,
+        Err(e) => {
+            tracing::error!(error = %e, "Fatal: .guardian-plan.json is corrupt or unreadable. Failing closed.");
+            std::process::exit(1);
+        }
+    };
+
+    let audit_log_path = guardian_core::telemetry::default_audit_log_path();
+    let (telemetry_tx, telemetry_writer) =
+        guardian_core::telemetry::TelemetryWriter::new(audit_log_path);
+
     let state = AppState {
         client,
         upstream_url,
         model: shared_model,
         domain,
         guardian_config,
+        preflight_plan,
+        telemetry_tx: Some(telemetry_tx.clone()),
     };
 
     let app = create_app(state);
@@ -215,6 +249,9 @@ async fn run_server_internal() {
     {
         tracing::error!("Server error: {}", e);
     }
+
+    drop(telemetry_tx);
+    let _ = telemetry_writer.handle.await;
 }
 
 pub async fn run_server_with_trust() {

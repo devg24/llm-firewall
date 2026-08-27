@@ -48,6 +48,8 @@ fn make_state(upstream_addr: std::net::SocketAddr) -> AppState {
         model: None,
         domain: guardian_core::DomainProfile::Standard,
         guardian_config: None,
+        preflight_plan: None,
+        telemetry_tx: None,
     }
 }
 

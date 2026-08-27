@@ -43,6 +43,11 @@ impl TokenMap {
     pub fn keys(&self) -> std::collections::hash_map::Keys<'_, String, (String, PiiType)> {
         self.inner.keys()
     }
+
+    /// Returns a list of all detected secret PII types recorded in this map.
+    pub fn secret_types(&self) -> Vec<PiiType> {
+        self.inner.values().map(|(_, pii_type)| *pii_type).collect()
+    }
 }
 
 impl Default for TokenMap {

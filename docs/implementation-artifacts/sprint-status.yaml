@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-19T17:02:00+05:30
-last_updated: 2026-08-25T17:08:00+05:30
+last_updated: 2026-08-27T20:56:00+05:30
 project: llm-firewall-rs
 project_key: NOKEY
 tracking_system: file-system
@@ -67,10 +67,10 @@ development_status:
   epic-4: done
   4-1-auto-detect-project-domain-from-manifests: done
   4-2-power-user-guardian-toml-configuration: done
-  epic-4-retrospective: optional
-  epic-5: backlog
-  5-1-pre-flight-security-plan-generation: backlog
-  5-2-compliance-audit-and-stats-engine: backlog
+  epic-4-retrospective: done
+  epic-5: done
+  5-1-pre-flight-security-plan-generation: done
+  5-2-compliance-audit-and-stats-engine: done
   epic-5-retrospective: optional
 
 action_items:
@@ -114,3 +114,15 @@ action_items:
     action: "Add test suite with real-world open source manifests to verify fail-safe fallback on malformed configs"
     owner: "Dana"
     status: done
+  - epic: 4
+    action: "Formulate path canonicalization and sandbox boundary specification for pre-flight workspace jailing"
+    owner: "Winston"
+    status: open
+  - epic: 4
+    action: "Design thread-safe, non-blocking telemetry event recorder in guardian-core / guardian-proxy using pure-Rust JSONL streaming"
+    owner: "Amelia"
+    status: open
+  - epic: 4
+    action: "Wire user-facing terminal commands (preflight, stats, report) and pre-flight bulk approval flow into guardian-cli"
+    owner: "Amelia"
+    status: open

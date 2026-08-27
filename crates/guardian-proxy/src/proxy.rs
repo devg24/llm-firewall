@@ -10,6 +10,8 @@ use guardian_core::TokenMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+pub use guardian_core::telemetry::{spawn_telemetry_writer, TelemetryWriter};
+
 pub struct SyncStream<S>(std::sync::Mutex<S>);
 
 unsafe impl<S: Send> Sync for SyncStream<S> {}
@@ -147,6 +149,35 @@ pub async fn proxy_handler(
         "Request proxied successfully"
     );
 
+    if let Some(ref tx) = state.telemetry_tx {
+        let req_id = headers
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                format!(
+                    "req-{}",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                )
+            });
+        let event = guardian_core::telemetry::TelemetryEvent {
+            timestamp: guardian_core::telemetry::TelemetryEvent::current_timestamp(),
+            request_id: req_id,
+            event_type: guardian_core::telemetry::TelemetryEventType::Passthrough,
+            tier_triggered: None,
+            secret_types: Vec::new(),
+            redacted_count: 0,
+            sandbox_violation: None,
+            model: None,
+            latency_ms: duration as u64,
+            estimated_cost_saved_usd: 0.0,
+        };
+        let _ = tx.send(event);
+    }
+
     // 7. Reconstruct Axum Response by streaming response bytes directly
     let res_stream = response.bytes_stream();
     let axum_body = Body::from_stream(res_stream);
@@ -275,6 +306,7 @@ pub enum ProxyError {
     Timeout(String),
     PayloadTooLarge,
     BadRequest(String),
+    Forbidden(String),
     Internal(String),
     TooManyRequests,
 }
@@ -300,6 +332,14 @@ impl IntoResponse for ProxyError {
                 StatusCode::BAD_REQUEST,
                 axum::Json(serde_json::json!({
                     "error": msg
+                })),
+            )
+                .into_response(),
+            ProxyError::Forbidden(msg) => (
+                StatusCode::FORBIDDEN,
+                axum::Json(serde_json::json!({
+                    "error": "Forbidden",
+                    "message": msg
                 })),
             )
                 .into_response(),
@@ -362,6 +402,71 @@ impl From<guardian_core::CoreError> for ProxyError {
     }
 }
 
+fn inspect_json_for_sandbox_violations(
+    val: &serde_json::Value,
+    sandbox: &guardian_core::plan::SandboxPolicy,
+) -> Result<(), ProxyError> {
+    match val {
+        serde_json::Value::Object(map) => {
+            for (_key, v) in map {
+                inspect_json_for_sandbox_violations(v, sandbox)?;
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                inspect_json_for_sandbox_violations(v, sandbox)?;
+            }
+        }
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.starts_with('{') && trimmed.ends_with('}') {
+                if let Ok(nested) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                    inspect_json_for_sandbox_violations(&nested, sandbox)?;
+                }
+            }
+
+            // Extract potential paths from string (e.g. if embedded in shell command)
+            let potential_paths: Vec<&str> = trimmed.split_whitespace().collect();
+            let mut paths_to_check = vec![trimmed];
+            if potential_paths.len() > 1 {
+                paths_to_check.extend(potential_paths);
+            }
+
+            for path_str in paths_to_check {
+                let p = path_str.trim_matches(|c| c == '"' || c == '\'' || c == '.' || c == ',');
+                if p.starts_with('/')
+                    || p.starts_with("~/")
+                    || p.contains("../")
+                    || p.contains("..\\")
+                    || p == ".."
+                    || p.contains(":\\")
+                    || p.starts_with("\\\\")
+                {
+                    let target = if p.starts_with("~/") {
+                        if let Ok(home) = std::env::var("HOME") {
+                            std::path::PathBuf::from(home).join(p.trim_start_matches("~/"))
+                        } else {
+                            std::path::PathBuf::from(p)
+                        }
+                    } else {
+                        std::path::PathBuf::from(p)
+                    };
+
+                    if let Err(violation) = sandbox.validate_path(&target) {
+                        tracing::warn!(violation = %violation, "Sandbox boundary violation detected in payload");
+                        return Err(ProxyError::Forbidden(format!(
+                            "Sandbox boundary violation: {}",
+                            violation
+                        )));
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub async fn chat_completions_handler(
     State(state): State<AppState>,
     method: Method,
@@ -387,9 +492,59 @@ pub async fn chat_completions_handler(
         }
     })?;
 
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "req-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            )
+        });
+
     // Parse payload into untyped JSON Value
     let mut payload: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| ProxyError::BadRequest(format!("Invalid JSON payload: {}", e)))?;
+
+    let model_name = payload
+        .get("model")
+        .and_then(|m| m.as_str())
+        .map(|s| s.to_string());
+
+    // If preflight plan is active, check sandbox violations
+    if let Some(ref plan) = state.preflight_plan {
+        tracing::debug!(
+            version = plan.version,
+            approved = plan.approved,
+            zones = plan.sensitive_zones.len(),
+            "Executing request with active preflight security plan"
+        );
+        if plan.sandbox.enforce_jailing {
+            if let Err(err) = inspect_json_for_sandbox_violations(&payload, &plan.sandbox) {
+                if let Some(ref tx) = state.telemetry_tx {
+                    let cost_model = guardian_core::telemetry::CostModel::default();
+                    let event = guardian_core::telemetry::TelemetryEvent {
+                        timestamp: guardian_core::telemetry::TelemetryEvent::current_timestamp(),
+                        request_id: request_id.clone(),
+                        event_type: guardian_core::telemetry::TelemetryEventType::SandboxBlocked,
+                        tier_triggered: Some(guardian_core::telemetry::DetectionTier::SandboxJail),
+                        secret_types: Vec::new(),
+                        redacted_count: 0,
+                        sandbox_violation: Some(format!("{:?}", err)),
+                        model: model_name.clone(),
+                        latency_ms: start_time.elapsed().as_millis() as u64,
+                        estimated_cost_saved_usd: cost_model.sandbox_violation_usd,
+                    };
+                    let _ = tx.send(event);
+                }
+                return Err(err);
+            }
+        }
+    }
 
     // Instantiate per-request TokenMap
     let token_map_arc = Arc::new(std::sync::Mutex::new(TokenMap::new()));
@@ -407,6 +562,57 @@ pub async fn chat_completions_handler(
     )
     .await
     .map_err(|e| ProxyError::BadRequest(format!("Pipeline failure: {}", e)))?;
+
+    // Record Telemetry for PII redaction / Passthrough
+    let (redacted_count, secret_types) = {
+        let lock = token_map_arc.lock().unwrap();
+        (lock.len(), lock.secret_types())
+    };
+
+    let cost_model = guardian_core::telemetry::CostModel::default();
+    let (event_type, tier_triggered, estimated_cost_saved_usd) = if redacted_count > 0 {
+        let tier = if secret_types.contains(&guardian_core::redact::PiiType::Person) {
+            guardian_core::telemetry::DetectionTier::Tier3Ner
+        } else if secret_types.contains(&guardian_core::redact::PiiType::HighEntropy) {
+            guardian_core::telemetry::DetectionTier::Tier2Entropy
+        } else if secret_types.contains(&guardian_core::redact::PiiType::Custom) {
+            guardian_core::telemetry::DetectionTier::CustomRule
+        } else {
+            guardian_core::telemetry::DetectionTier::Tier1Regex
+        };
+        let savings = cost_model.calculate_event_savings(
+            guardian_core::telemetry::TelemetryEventType::PiiIntercepted,
+            &secret_types,
+            redacted_count,
+        );
+        (
+            guardian_core::telemetry::TelemetryEventType::PiiIntercepted,
+            Some(tier),
+            savings,
+        )
+    } else {
+        (
+            guardian_core::telemetry::TelemetryEventType::Passthrough,
+            None,
+            0.0,
+        )
+    };
+
+    if let Some(ref tx) = state.telemetry_tx {
+        let event = guardian_core::telemetry::TelemetryEvent {
+            timestamp: guardian_core::telemetry::TelemetryEvent::current_timestamp(),
+            request_id: request_id.clone(),
+            event_type,
+            tier_triggered,
+            secret_types,
+            redacted_count,
+            sandbox_violation: None,
+            model: model_name.clone(),
+            latency_ms: start_time.elapsed().as_millis() as u64,
+            estimated_cost_saved_usd,
+        };
+        let _ = tx.send(event);
+    }
 
     // Inject system prompt guard instruction (AD-11)
     if let Some(messages) = payload.get_mut("messages").and_then(|m| m.as_array_mut()) {
@@ -524,6 +730,143 @@ pub async fn chat_completions_handler(
             fragment_buf: String,
             lookbehind: String,
             sink_detector: guardian_core::DangerousSinkDetector,
+            telemetry_tx: Option<
+                tokio::sync::mpsc::UnboundedSender<guardian_core::telemetry::TelemetryEvent>,
+            >,
+            request_id: String,
+            model: Option<String>,
+        }
+
+        impl SseState {
+            fn process_event(&mut self, event: Vec<u8>) -> Vec<u8> {
+                let event_str = match std::str::from_utf8(&event) {
+                    Ok(s) => s,
+                    Err(_) => return event,
+                };
+
+                if !event_str.starts_with("data: ") {
+                    return event;
+                }
+
+                let data_str = event_str.trim_start_matches("data: ").trim_end();
+                if data_str == "[DONE]" {
+                    return event;
+                }
+
+                let mut parsed: serde_json::Value = match serde_json::from_str(data_str) {
+                    Ok(v) => v,
+                    Err(_) => return event,
+                };
+
+                let mut modified = false;
+                if let Some(choices) = parsed.get_mut("choices").and_then(|c| c.as_array_mut()) {
+                    for choice in choices {
+                        let content_target = if let Some(delta) = choice.get_mut("delta") {
+                            delta.get_mut("content")
+                        } else if let Some(message) = choice.get_mut("message") {
+                            message.get_mut("content")
+                        } else {
+                            None
+                        };
+
+                        if let Some(serde_json::Value::String(content)) = content_target {
+                            self.lookbehind.push_str(content.as_str());
+                            if self.lookbehind.len() > 512 {
+                                let trim_pos = self.lookbehind.len() - 512;
+                                let mut char_pos = trim_pos;
+                                while char_pos < self.lookbehind.len()
+                                    && !self.lookbehind.is_char_boundary(char_pos)
+                                {
+                                    char_pos += 1;
+                                }
+                                self.lookbehind = self.lookbehind[char_pos..].to_string();
+                            }
+
+                            let to_scan = self.fragment_buf.clone() + content.as_str();
+
+                            let mut partial = String::new();
+                            let mut full_content_to_replace = to_scan.clone();
+
+                            if let Some(incomplete_start) = to_scan.rfind("[REDACT") {
+                                if !to_scan[incomplete_start..].contains(']') {
+                                    partial = to_scan[incomplete_start..].to_string();
+                                    full_content_to_replace =
+                                        to_scan[..incomplete_start].to_string();
+                                }
+                            }
+
+                            self.fragment_buf = partial;
+
+                            let (tokens, original_values) = {
+                                let lock = self.token_map.lock().unwrap();
+                                let mut tokens = Vec::new();
+                                let mut original_values = Vec::new();
+                                for k in lock.keys() {
+                                    if let Some((secret, _)) = lock.get(k) {
+                                        tokens.push(k.clone());
+                                        original_values.push(secret.clone());
+                                    }
+                                }
+                                (tokens, original_values)
+                            };
+
+                            let final_content = if !tokens.is_empty() {
+                                let is_dangerous =
+                                    self.sink_detector.is_dangerous_context(&self.lookbehind);
+                                if is_dangerous {
+                                    tracing::warn!(
+                                        lookbehind = %self.lookbehind,
+                                        "Dangerous sink context detected, blocking token re-injection"
+                                    );
+                                    if let Some(ref tx) = self.telemetry_tx {
+                                        let ev = guardian_core::telemetry::TelemetryEvent {
+                                            timestamp: guardian_core::telemetry::TelemetryEvent::current_timestamp(),
+                                            request_id: self.request_id.clone(),
+                                            event_type: guardian_core::telemetry::TelemetryEventType::SinkBlocked,
+                                            tier_triggered: Some(guardian_core::telemetry::DetectionTier::DangerousSink),
+                                            secret_types: Vec::new(),
+                                            redacted_count: 0,
+                                            sandbox_violation: None,
+                                            model: self.model.clone(),
+                                            latency_ms: 0,
+                                            estimated_cost_saved_usd: 2500.0,
+                                        };
+                                        let _ = tx.send(ev);
+                                    }
+                                    full_content_to_replace
+                                } else {
+                                    match aho_corasick::AhoCorasick::new(&tokens) {
+                                        Ok(ac) => ac.replace_all(
+                                            &full_content_to_replace,
+                                            &original_values,
+                                        ),
+                                        Err(e) => {
+                                            tracing::error!(error = %e, "Failed to build AhoCorasick automaton for token re-injection");
+                                            full_content_to_replace
+                                        }
+                                    }
+                                }
+                            } else {
+                                full_content_to_replace
+                            };
+
+                            if final_content != content.as_str() {
+                                *content = final_content;
+                                modified = true;
+                            }
+                        }
+                    }
+                }
+
+                if modified {
+                    let mut new_event = String::from("data: ");
+                    new_event.push_str(&serde_json::to_string(&parsed).unwrap());
+                    new_event.push_str("\n\n");
+                    return new_event.into_bytes();
+                }
+
+                event
+            }
         }
 
         let state = SseState {
@@ -535,6 +878,9 @@ pub async fn chat_completions_handler(
             fragment_buf: String::new(),
             lookbehind: String::new(),
             sink_detector: guardian_core::DangerousSinkDetector::new(),
+            telemetry_tx: state.telemetry_tx.clone(),
+            request_id: request_id.clone(),
+            model: model_name.clone(),
         };
 
         let output_stream = futures_util::stream::unfold(state, |mut s| async move {
@@ -557,25 +903,13 @@ pub async fn chat_completions_handler(
                 // Check if we have a complete event in the buffer.
                 if let Some(pos) = find_double_newline(&s.buf) {
                     let event: Vec<u8> = s.buf.drain(..pos).collect();
-                    let processed_event = process_sse_event(
-                        event,
-                        &mut s.fragment_buf,
-                        &s.token_map,
-                        &mut s.lookbehind,
-                        &s.sink_detector,
-                    );
+                    let processed_event = s.process_event(event);
 
                     // Collect any additional complete events into pending (LIFO pop, so reverse).
                     let mut extra = Vec::new();
                     while let Some(p2) = find_double_newline(&s.buf) {
                         let ev2: Vec<u8> = s.buf.drain(..p2).collect();
-                        let processed_ev2 = process_sse_event(
-                            ev2,
-                            &mut s.fragment_buf,
-                            &s.token_map,
-                            &mut s.lookbehind,
-                            &s.sink_detector,
-                        );
+                        let processed_ev2 = s.process_event(ev2);
                         extra.push(bytes::Bytes::from(processed_ev2));
                     }
                     extra.reverse();
@@ -623,120 +957,6 @@ pub async fn chat_completions_handler(
         )
             .into_response()
     }))
-}
-
-fn process_sse_event(
-    event: Vec<u8>,
-    fragment_buf: &mut String,
-    token_map: &Arc<std::sync::Mutex<TokenMap>>,
-    lookbehind: &mut String,
-    sink_detector: &guardian_core::DangerousSinkDetector,
-) -> Vec<u8> {
-    let event_str = match std::str::from_utf8(&event) {
-        Ok(s) => s,
-        Err(_) => return event,
-    };
-
-    if !event_str.starts_with("data: ") {
-        return event;
-    }
-
-    let data_str = event_str.trim_start_matches("data: ").trim_end();
-    if data_str == "[DONE]" {
-        return event;
-    }
-
-    let mut parsed: serde_json::Value = match serde_json::from_str(data_str) {
-        Ok(v) => v,
-        Err(_) => return event,
-    };
-
-    let mut modified = false;
-    if let Some(choices) = parsed.get_mut("choices").and_then(|c| c.as_array_mut()) {
-        for choice in choices {
-            let content_target = if let Some(delta) = choice.get_mut("delta") {
-                delta.get_mut("content")
-            } else if let Some(message) = choice.get_mut("message") {
-                message.get_mut("content")
-            } else {
-                None
-            };
-
-            if let Some(serde_json::Value::String(content)) = content_target {
-                lookbehind.push_str(content.as_str());
-                if lookbehind.len() > 512 {
-                    let trim_pos = lookbehind.len() - 512;
-                    let mut char_pos = trim_pos;
-                    while char_pos < lookbehind.len() && !lookbehind.is_char_boundary(char_pos) {
-                        char_pos += 1;
-                    }
-                    *lookbehind = lookbehind[char_pos..].to_string();
-                }
-
-                let to_scan = fragment_buf.clone() + content.as_str();
-
-                let mut partial = String::new();
-                let mut full_content_to_replace = to_scan.clone();
-
-                if let Some(incomplete_start) = to_scan.rfind("[REDACT") {
-                    if !to_scan[incomplete_start..].contains(']') {
-                        partial = to_scan[incomplete_start..].to_string();
-                        full_content_to_replace = to_scan[..incomplete_start].to_string();
-                    }
-                }
-
-                *fragment_buf = partial;
-
-                let (tokens, original_values) = {
-                    let lock = token_map.lock().unwrap();
-                    let mut tokens = Vec::new();
-                    let mut original_values = Vec::new();
-                    for k in lock.keys() {
-                        if let Some((secret, _)) = lock.get(k) {
-                            tokens.push(k.clone());
-                            original_values.push(secret.clone());
-                        }
-                    }
-                    (tokens, original_values)
-                };
-
-                let final_content = if !tokens.is_empty() {
-                    let is_dangerous = sink_detector.is_dangerous_context(lookbehind);
-                    if is_dangerous {
-                        tracing::warn!(
-                            lookbehind = %lookbehind,
-                            "Dangerous sink context detected, blocking token re-injection"
-                        );
-                        full_content_to_replace
-                    } else {
-                        match aho_corasick::AhoCorasick::new(&tokens) {
-                            Ok(ac) => ac.replace_all(&full_content_to_replace, &original_values),
-                            Err(e) => {
-                                tracing::error!(error = %e, "Failed to build AhoCorasick automaton for token re-injection");
-                                full_content_to_replace
-                            }
-                        }
-                    }
-                } else {
-                    full_content_to_replace
-                };
-
-                if final_content != content.as_str() {
-                    *content = final_content;
-                    modified = true;
-                }
-            }
-        }
-    }
-
-    if modified {
-        let mut new_event = String::from("data: ");
-        new_event.push_str(&serde_json::to_string(&parsed).unwrap());
-        new_event.push_str("\n\n");
-        return new_event.into_bytes();
-    }
-
-    event
 }
 
 /// Find the end boundary of the first complete SSE event in `buf`.

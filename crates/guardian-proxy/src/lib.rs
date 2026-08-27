@@ -14,6 +14,7 @@ use guardian_core::domain::DomainProfile;
 use guardian_core::ml::SharedModel;
 use std::sync::Arc;
 
+pub use guardian_core::telemetry::{spawn_telemetry_writer, TelemetryWriter};
 pub use proxy::{chat_completions_handler, proxy_handler, ProxyError};
 
 /// Shared application state injected into every Axum handler via `State<AppState>`.
@@ -32,6 +33,11 @@ pub struct AppState {
     pub domain: DomainProfile,
     /// Optional power-user configuration loaded from .guardian.toml.
     pub guardian_config: Option<guardian_core::manifest::GuardianConfig>,
+    /// Optional pre-approved pre-flight security plan for unattended sessions.
+    pub preflight_plan: Option<Arc<guardian_core::plan::PreflightPlan>>,
+    /// Optional non-blocking channel sender for audit telemetry event logging.
+    pub telemetry_tx:
+        Option<tokio::sync::mpsc::UnboundedSender<guardian_core::telemetry::TelemetryEvent>>,
 }
 
 /// Builds the Axum [`Router`] with all proxy routes attached to `state`.
