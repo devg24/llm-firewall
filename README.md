@@ -32,18 +32,31 @@ When you or your team use AI coding assistants (**Claude Code**, **Cursor**, **C
 
 ---
 
-## ⚡ Quick Start in 30 Seconds
+## ⚡ Quick Start
 
-### 1. Install via Cargo
+### 1. Install
 
+**Option A: Pre-compiled binaries (macOS / Linux / Windows)**
+Download the latest binary from [GitHub Releases](https://github.com/devg24/llm-firewall/releases).
+
+```bash
+# macOS (Apple Silicon) example
+curl -LO https://github.com/devg24/llm-firewall/releases/latest/download/llm-firewall-aarch64-apple-darwin.tar.gz
+tar -xzf llm-firewall-aarch64-apple-darwin.tar.gz
+sudo mv llm-firewall /usr/local/bin/
+```
+
+**Option B: Via Cargo**
 ```bash
 cargo install --git https://github.com/devg24/llm-firewall.git
 ```
 
-*Or build from source:*
+**Option C: Build from source**
 ```bash
-git clone https://github.com/devg24/llm-firewall.git && cd llm-firewall
-cargo build --release && cp target/release/llm-firewall-rs /usr/local/bin/llm-firewall
+git clone https://github.com/devg24/llm-firewall.git
+cd llm-firewall
+cargo build --release
+sudo cp target/release/llm-firewall-rs /usr/local/bin/llm-firewall
 ```
 
 ### 2. Scan your repo for risk
@@ -334,7 +347,22 @@ cargo test --workspace
 
 # Enforce strict zero-warning policy
 cargo clippy --workspace --all-targets -- -D warnings
+
+# Check formatting
+cargo fmt --check
 ```
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome. To contribute:
+
+1. Fork the repository and create a feature branch (`git checkout -b feature/my-feature`).
+2. Make your changes and ensure all tests pass (`cargo test --workspace`).
+3. Ensure no clippy warnings or formatting issues (`cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check`).
+4. Commit your changes with conventional commit messages and push your branch.
+5. Open a Pull Request against `main`. All PRs must pass automated CI checks before merging.
 
 ---
 
