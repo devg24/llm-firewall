@@ -8,6 +8,7 @@
 //! - [`proxy::ProxyError`]: proxy error type with HTTP response mapping
 
 pub mod connect;
+pub mod ide_adapters;
 pub mod proxy;
 
 use axum::{routing::get, Router};
