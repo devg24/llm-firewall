@@ -9,7 +9,6 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 guardian-core = { path = "../guardian-core", version = "0.5.0" }
 guardian-proxy = { path = "../guardian-proxy", version = "0.5.0" }
-axum = "0.8.9"
 tokio = { version = "1.52.3", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -17,11 +16,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 reqwest = { version = "0.13.4", features = ["json", "stream"] }
 rcgen = "0.14.7"
-x509-parser = "0.18.1"
 ignore = "0.4.30"
 rustls-pemfile = "2.2.0"
-rustls = { version = "0.23", features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { version = "1.52.3", features = ["macros", "rt-multi-thread"] }
+x509-parser = "0.18.1"

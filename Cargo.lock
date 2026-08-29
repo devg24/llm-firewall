@@ -944,7 +944,6 @@ dependencies = [
 name = "guardian-cli"
 version = "0.5.0"
 dependencies = [
- "axum",
  "guardian-core",
  "guardian-proxy",
  "ignore",
@@ -990,7 +989,6 @@ dependencies = [
  "axum",
  "bytes",
  "flate2",
- "form_urlencoded",
  "futures-core",
  "futures-util",
  "guardian-core",
@@ -999,7 +997,6 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rcgen",
- "regex",
  "reqwest",
  "rustls",
  "serde",
@@ -1463,25 +1460,8 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 name = "llm-firewall-rs"
 version = "0.5.0"
 dependencies = [
- "axum",
- "candle-core",
- "candle-nn",
- "candle-transformers",
- "form_urlencoded",
- "futures-core",
  "guardian-cli",
- "guardian-core",
- "guardian-proxy",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "tokenizers",
  "tokio",
- "tracing",
- "tracing-subscriber",
- "unicode-normalization",
- "url",
 ]
 
 [[package]]
