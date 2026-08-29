@@ -50,8 +50,9 @@ impl LocalCA {
             .ok_or("Certificate path contains non-UTF8 characters")?;
         if cfg!(target_os = "macos") {
             runner.run(
-                "security",
+                "sudo",
                 &[
+                    "security",
                     "add-trusted-cert",
                     "-d",
                     "-r",
@@ -76,7 +77,7 @@ impl LocalCA {
             .to_str()
             .ok_or("Certificate path contains non-UTF8 characters")?;
         if cfg!(target_os = "macos") {
-            runner.run("security", &["remove-trusted-cert", "-d", cert_path_str])?;
+            runner.run("sudo", &["security", "remove-trusted-cert", "-d", cert_path_str])?;
         } else {
             return Err("OS not supported for local CA untrust".into());
         }
@@ -186,13 +187,15 @@ mod tests {
 
         if cfg!(target_os = "macos") {
             assert_eq!(cmds.len(), 2);
-            assert_eq!(cmds[0].0, "security");
-            assert_eq!(cmds[0].1[0], "add-trusted-cert");
-            assert_eq!(cmds[0].1[4], "-k");
+            assert_eq!(cmds[0].0, "sudo");
+            assert_eq!(cmds[0].1[0], "security");
+            assert_eq!(cmds[0].1[1], "add-trusted-cert");
+            assert_eq!(cmds[0].1[5], "-k");
             assert_eq!(cmds[0].1.last().unwrap(), ca.cert_path.to_str().unwrap());
 
-            assert_eq!(cmds[1].0, "security");
-            assert_eq!(cmds[1].1[0], "remove-trusted-cert");
+            assert_eq!(cmds[1].0, "sudo");
+            assert_eq!(cmds[1].1[0], "security");
+            assert_eq!(cmds[1].1[1], "remove-trusted-cert");
             assert_eq!(cmds[1].1.last().unwrap(), ca.cert_path.to_str().unwrap());
         }
     }

@@ -4,3 +4,7 @@
 /.agent/
 /_bmad/
 model/
+.llm-firewall-certs/
+*.pem
+*.key
+*.crt

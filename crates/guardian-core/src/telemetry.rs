@@ -269,7 +269,9 @@ pub fn default_audit_log_path() -> PathBuf {
         let trimmed = env_path.trim();
         if !trimmed.is_empty() {
             let path = PathBuf::from(trimmed);
-            let has_traversal = path.components().any(|c| c == std::path::Component::ParentDir);
+            let has_traversal = path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir);
             if has_traversal {
                 tracing::warn!("GUARDIAN_AUDIT_LOG contains directory traversal (..). Falling back to default.");
             } else {
@@ -374,7 +376,10 @@ impl TelemetryWriter {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
+                        let _ = std::fs::set_permissions(
+                            &log_path,
+                            std::fs::Permissions::from_mode(0o600),
+                        );
                     }
                     f
                 }
@@ -423,7 +428,8 @@ pub fn spawn_telemetry_writer(
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
+                    let _ =
+                        std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
                 }
                 f
             }

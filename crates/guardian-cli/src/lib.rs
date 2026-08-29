@@ -329,8 +329,8 @@ pub async fn run_cli() {
                 return;
             }
             "preflight" => {
-                let preflight_args = preflight::parse_preflight_args(&args[2..])
-                    .unwrap_or_else(|e| {
+                let preflight_args =
+                    preflight::parse_preflight_args(&args[2..]).unwrap_or_else(|e| {
                         eprintln!("Error: {}", e);
                         std::process::exit(1);
                     });
@@ -341,11 +341,10 @@ pub async fn run_cli() {
                 return;
             }
             "stats" => {
-                let stats_args =
-                    stats::parse_stats_args(&args[2..]).unwrap_or_else(|e| {
-                        eprintln!("Error: {}", e);
-                        std::process::exit(1);
-                    });
+                let stats_args = stats::parse_stats_args(&args[2..]).unwrap_or_else(|e| {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                });
                 if let Err(e) = stats::run_stats(stats_args) {
                     eprintln!("Stats error: {}", e);
                     std::process::exit(1);
@@ -353,11 +352,10 @@ pub async fn run_cli() {
                 return;
             }
             "report" => {
-                let report_args = report::parse_report_args(&args[2..])
-                    .unwrap_or_else(|e| {
-                        eprintln!("Error: {}", e);
-                        std::process::exit(1);
-                    });
+                let report_args = report::parse_report_args(&args[2..]).unwrap_or_else(|e| {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                });
                 if let Err(e) = report::run_report(report_args) {
                     eprintln!("Report error: {}", e);
                     std::process::exit(1);
