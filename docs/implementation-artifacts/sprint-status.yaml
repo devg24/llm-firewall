@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-08-19T17:02:00+05:30
-last_updated: 2026-08-27T20:56:00+05:30
+last_updated: 2026-08-29T18:15:00+05:30
 project: llm-firewall-rs
 project_key: NOKEY
 tracking_system: file-system
@@ -117,12 +117,12 @@ action_items:
   - epic: 4
     action: "Formulate path canonicalization and sandbox boundary specification for pre-flight workspace jailing"
     owner: "Winston"
-    status: open
+    status: done
   - epic: 4
     action: "Design thread-safe, non-blocking telemetry event recorder in guardian-core / guardian-proxy using pure-Rust JSONL streaming"
     owner: "Amelia"
-    status: open
+    status: done
   - epic: 4
     action: "Wire user-facing terminal commands (preflight, stats, report) and pre-flight bulk approval flow into guardian-cli"
     owner: "Amelia"
-    status: open
+    status: done

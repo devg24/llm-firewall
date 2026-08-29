@@ -12,7 +12,7 @@
 **Stop leaking API keys, proprietary secrets, and customer PII to external LLM providers.**  
 **`llm-firewall` is a blazing-fast, local-first proxy CLI that transparently redacts secrets before they leave your machine and safely restores them on the return trip.**
 
-[Quick Start](#-quick-start-in-30-seconds) • [CLI Commands](#-cli-command-suite) • [How It Works](#-how-it-works) • [Supported Tools](#-supported-ai-tools) • [Compliance](#-compliance-ready-audit-reports)
+[Quick Start](#-quick-start-in-30-seconds) • [CLI Commands](#-cli-command-suite) • [How It Works](#-how-it-works) • [Supported Tools](#-supported-ai-tools) • [Compliance](#-compliance-ready-audit-reports) • [Changelog](CHANGELOG.md)
 
 ---
 
@@ -276,14 +276,14 @@ flowchart TD
 
 ## 🤖 Supported AI Tools
 
-| Tool | Integration Mode | Setup |
-| :--- | :--- | :--- |
-| **Claude Code** | Automatic env export (`HTTP_PROXY`, `HTTPS_PROXY`) | Configured automatically via `llm-firewall on` |
-| **Cursor** | Automatic `settings.json` proxy & CA configuration | Configured automatically via `llm-firewall on` |
-| **GitHub Copilot** | Automatic `http.proxy` patching | Configured automatically via `llm-firewall on` |
-| **OpenAI / Anthropic SDKs** | Set `base_url = "http://localhost:3000/v1"` | Zero code changes required |
-| **LangChain / LlamaIndex** | Set proxy endpoint or environment variable | Native HTTP proxy support |
-| **Autonomous Agents (SWE-bench, Devin)** | `llm-firewall preflight` + `llm-firewall on` | Sandboxed, unattended autonomous execution |
+| Tool | Integration Mode | Technical Mechanism | Setup |
+| :--- | :--- | :--- | :--- |
+| **Cursor** | Single-Port TCP CONNECT Tunneling | Deep `RunSSE` / `BidiAppend` payload interception with gRPC block responses | Configured automatically via `llm-firewall on` |
+| **Claude Code** | Transparent Forward Proxy | Automatic env export (`HTTP_PROXY`, `HTTPS_PROXY`) + CA trust | Configured automatically via `llm-firewall on` |
+| **GitHub Copilot** | VS Code / JetBrains Proxy | Auto-patched `http.proxy` and local certificate trust | Configured automatically via `llm-firewall on` |
+| **OpenAI / Anthropic SDKs** | Reverse Proxy Multiplexer | Set `base_url = "http://localhost:3000/v1"` (shared single port) | Zero code changes required |
+| **LangChain / LlamaIndex** | Standard HTTP/HTTPS Proxy | Native HTTP proxy support via single-port peeker | Set proxy env or client config |
+| **Autonomous Agents (SWE-bench, Devin)** | Sandboxed Execution | `llm-firewall preflight` + `llm-firewall on` | Strict path jail & unattended approval |
 
 ---
 
