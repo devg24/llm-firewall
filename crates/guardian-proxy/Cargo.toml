@@ -1,6 +1,6 @@
 [package]
 name = "guardian-proxy"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.85.0"
 description = "Axum MITM proxy handlers, ProxyError, and AppState for LLM Firewall"
@@ -14,7 +14,7 @@ hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 tower = "0.5"
 rcgen = { version = "0.14.7", features = ["x509-parser"] }
 
-guardian-core = { path = "../guardian-core" }
+guardian-core = { path = "../guardian-core", version = "0.5.0" }
 axum = "0.8.9"
 tokio = { version = "1.52.3", features = ["full"] }
 tracing = "0.1"

@@ -942,7 +942,7 @@ dependencies = [
 
 [[package]]
 name = "guardian-cli"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "axum",
  "guardian-core",
@@ -963,7 +963,7 @@ dependencies = [
 
 [[package]]
 name = "guardian-core"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "aho-corasick",
  "candle-core",
@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "guardian-proxy"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "aho-corasick",
  "axum",
@@ -1461,7 +1461,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "llm-firewall-rs"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "axum",
  "candle-core",
