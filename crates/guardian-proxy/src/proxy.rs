@@ -75,7 +75,21 @@ pub async fn proxy_handler(
     let path = uri.path();
     let query = uri.query();
 
-    let mut target_url = state.upstream_url.clone();
+    // Extract dynamic upstream URL if this is a MITM request
+    let mut target_url = if headers.contains_key("x-firewall-mitm") {
+        if let Some(host_header) = headers.get(axum::http::header::HOST) {
+            if let Ok(host_str) = host_header.to_str() {
+                reqwest::Url::parse(&format!("https://{}", host_str))
+                    .unwrap_or_else(|_| state.upstream_url.clone())
+            } else {
+                state.upstream_url.clone()
+            }
+        } else {
+            state.upstream_url.clone()
+        }
+    } else {
+        state.upstream_url.clone()
+    };
 
     // Joint path logic to preserve configured base path prefix
     let base_path = target_url.path().trim_end_matches('/');
@@ -91,15 +105,110 @@ pub async fn proxy_handler(
     target_url.set_query(merged_query.as_deref());
 
     // 2. Wrap the request body stream to be thread-safe (Sync) for reqwest
-    let stream = body.into_data_stream();
-    let sync_stream = SyncStream(std::sync::Mutex::new(stream));
-    let reqwest_body = reqwest::Body::wrap_stream(sync_stream);
+    let reqwest_body = if path.contains("RunSSE") || path.contains("BidiAppend") {
+        let bytes = axum::body::to_bytes(body, 5 * 1024 * 1024)
+            .await
+            .unwrap_or_default();
+
+        let mut data = bytes.to_vec();
+        if data.len() >= 2 && data[0] == 0x1f && data[1] == 0x8b {
+            use std::io::Read;
+            let mut decoder = flate2::read::GzDecoder::new(data.as_slice());
+            let mut decompressed = Vec::new();
+            if decoder.read_to_end(&mut decompressed).is_ok() {
+                data = decompressed;
+            }
+        }
+
+        let mut combined_text = String::from_utf8_lossy(&data).into_owned();
+        let mut current_hex = String::new();
+        for c in combined_text.clone().chars() {
+            if c.is_ascii_hexdigit() {
+                current_hex.push(c);
+            } else {
+                if current_hex.len() >= 32 && current_hex.len() % 2 == 0 {
+                    if let Ok(decoded) = hex::decode(&current_hex) {
+                        combined_text.push('\n');
+                        combined_text.push_str(&String::from_utf8_lossy(&decoded));
+                    }
+                }
+                current_hex.clear();
+            }
+        }
+        if current_hex.len() >= 32 && current_hex.len() % 2 == 0 {
+            if let Ok(decoded) = hex::decode(&current_hex) {
+                combined_text.push('\n');
+                combined_text.push_str(&String::from_utf8_lossy(&decoded));
+            }
+        }
+
+        let orchestrator = guardian_core::orchestrator::DetectionOrchestrator::with_config(
+            state.model.clone(),
+            state.domain,
+            state.guardian_config.as_ref(),
+        );
+
+        if let Ok(spans) = orchestrator.orchestrate(&combined_text).await {
+            if !spans.is_empty() {
+                tracing::warn!("PII DETECTED IN CURSOR ENDPOINT [{}] -> BLOCKING!", path);
+
+                // Telemetry tracking for blocked request
+                if let Some(ref tx) = state.telemetry_tx {
+                    let cost_model = guardian_core::telemetry::CostModel::default();
+                    let request_id = format!(
+                        "req-cursor-{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_nanos()
+                    );
+                    let mut secret_types = vec![];
+                    for span in &spans {
+                        if !secret_types.contains(&span.label) {
+                            secret_types.push(span.label);
+                        }
+                    }
+                    let event = guardian_core::telemetry::TelemetryEvent {
+                        timestamp: guardian_core::telemetry::TelemetryEvent::current_timestamp(),
+                        request_id,
+                        event_type: guardian_core::telemetry::TelemetryEventType::PiiIntercepted,
+                        tier_triggered: Some(guardian_core::telemetry::DetectionTier::Tier3Ner),
+                        secret_types,
+                        redacted_count: spans.len(),
+                        sandbox_violation: None,
+                        model: Some("cursor-custom".to_string()),
+                        latency_ms: start_time.elapsed().as_millis() as u64,
+                        estimated_cost_saved_usd: cost_model.calculate_event_savings(
+                            guardian_core::telemetry::TelemetryEventType::PiiIntercepted,
+                            &[],
+                            spans.len(),
+                        ),
+                    };
+                    let _ = tx.send(event);
+                }
+
+                return axum::response::Response::builder()
+                    .status(axum::http::StatusCode::FORBIDDEN)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        "{\"error\": \"LLM Firewall: PII detected in Cursor request!\"}",
+                    ))
+                    .unwrap();
+            }
+        }
+
+        reqwest::Body::from(bytes)
+    } else {
+        let stream = body.into_data_stream();
+        let sync_stream = SyncStream(std::sync::Mutex::new(stream));
+        reqwest::Body::wrap_stream(sync_stream)
+    };
 
     // 3. Create the reqwest request
     let mut req_builder = state.client.request(method.clone(), target_url.clone());
 
     // Copy request headers, excluding hop-by-hop headers, and rewrite Host
-    let req_headers = match copy_request_headers(&headers, &state.upstream_url) {
+    let req_headers = match copy_request_headers(&headers, &target_url) {
         Ok(h) => h,
         Err(err) => return err.into_response(),
     };
@@ -141,9 +250,9 @@ pub async fn proxy_handler(
     let duration = start_time.elapsed().as_millis();
 
     // 6. Log response
-    tracing::info!(
-        method = method.as_str(),
-        path = path,
+    tracing::debug!(
+        method = %method,
+        path = %path,
         duration_ms = duration,
         status_code = status_code,
         "Request proxied successfully"
@@ -541,6 +650,11 @@ pub async fn chat_completions_handler(
                     };
                     let _ = tx.send(event);
                 }
+                if headers.contains_key("x-firewall-mitm") {
+                    let host = headers.get("host").and_then(|h| h.to_str().ok());
+                    let reason = format!("{:?}", err);
+                    return Ok(make_dynamic_block_response(&payload, host, &reason));
+                }
                 return Err(err);
             }
         }
@@ -645,7 +759,20 @@ pub async fn chat_completions_handler(
 
     // 2. Reconstruct target URL
     let query = uri.query();
-    let mut target_url = state.upstream_url.clone();
+    let mut target_url = if headers.contains_key("x-firewall-mitm") {
+        if let Some(host_header) = headers.get(axum::http::header::HOST) {
+            if let Ok(host_str) = host_header.to_str() {
+                reqwest::Url::parse(&format!("https://{}", host_str))
+                    .unwrap_or_else(|_| state.upstream_url.clone())
+            } else {
+                state.upstream_url.clone()
+            }
+        } else {
+            state.upstream_url.clone()
+        }
+    } else {
+        state.upstream_url.clone()
+    };
 
     let base_path = target_url.path().trim_end_matches('/');
     let joined_path = if base_path.is_empty() {
@@ -659,7 +786,7 @@ pub async fn chat_completions_handler(
     target_url.set_query(merged_query.as_deref());
 
     // 3. Prepare reqwest request headers
-    let mut req_headers = copy_request_headers(&headers, &state.upstream_url)?;
+    let mut req_headers = copy_request_headers(&headers, &target_url)?;
 
     // Set recalculated Content-Length
     let length = new_bytes.len();
@@ -968,6 +1095,100 @@ fn find_double_newline(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == b"\n\n").map(|pos| pos + 2)
 }
 
+/// Builds a dynamic HTTP response mimicking an LLM provider block.
+/// Detects stream vs REST and OpenAI vs Anthropic from payload/headers.
+pub fn make_dynamic_block_response(
+    payload: &serde_json::Value,
+    host: Option<&str>,
+    reason: &str,
+) -> Response {
+    let is_stream = payload
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let is_anthropic = host.unwrap_or("").contains("anthropic");
+
+    let msg = format!("⚠️ **LLM Firewall blocked this request.** {}", reason);
+
+    if is_stream {
+        if is_anthropic {
+            let chunk = serde_json::json!({
+                "type": "message_delta",
+                "delta": {
+                    "text": msg
+                }
+            });
+            let body = format!(
+                "event: message_delta\ndata: {}\n\nevent: message_stop\ndata: {{}}\n\n",
+                serde_json::to_string(&chunk).unwrap()
+            );
+            Response::builder()
+                .status(200)
+                .header("Content-Type", "text/event-stream")
+                .header("Cache-Control", "no-cache")
+                .header("X-Firewall-Block", "true")
+                .body(Body::from(body))
+                .unwrap()
+        } else {
+            let chunk1 = serde_json::json!({
+                "id": "fw-block",
+                "object": "chat.completion.chunk",
+                "choices": [{
+                    "delta": { "content": msg },
+                    "index": 0,
+                    "finish_reason": null
+                }]
+            });
+            let chunk2 = serde_json::json!({
+                "id": "fw-block",
+                "object": "chat.completion.chunk",
+                "choices": [{"delta": {}, "index": 0, "finish_reason": "stop"}]
+            });
+            let body = format!(
+                "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+                serde_json::to_string(&chunk1).unwrap(),
+                serde_json::to_string(&chunk2).unwrap()
+            );
+            Response::builder()
+                .status(200)
+                .header("Content-Type", "text/event-stream")
+                .header("Cache-Control", "no-cache")
+                .header("X-Firewall-Block", "true")
+                .body(Body::from(body))
+                .unwrap()
+        }
+    } else {
+        if is_anthropic {
+            let body = serde_json::json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": msg}]
+            });
+            Response::builder()
+                .status(200)
+                .header("Content-Type", "application/json")
+                .header("X-Firewall-Block", "true")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap()
+        } else {
+            let body = serde_json::json!({
+                "id": "fw-block",
+                "object": "chat.completion",
+                "choices": [{
+                    "message": { "role": "assistant", "content": msg },
+                    "index": 0,
+                    "finish_reason": "stop"
+                }]
+            });
+            Response::builder()
+                .status(200)
+                .header("Content-Type", "application/json")
+                .header("X-Firewall-Block", "true")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap()
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

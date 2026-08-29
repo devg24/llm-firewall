@@ -77,7 +77,10 @@ impl LocalCA {
             .to_str()
             .ok_or("Certificate path contains non-UTF8 characters")?;
         if cfg!(target_os = "macos") {
-            runner.run("sudo", &["security", "remove-trusted-cert", "-d", cert_path_str])?;
+            runner.run(
+                "sudo",
+                &["security", "remove-trusted-cert", "-d", cert_path_str],
+            )?;
         } else {
             return Err("OS not supported for local CA untrust".into());
         }
@@ -110,6 +113,31 @@ impl CommandRunner for RealCommandRunner {
     }
 }
 
+impl LocalCA {
+    pub fn load_key_pair(
+        cert_dir: &std::path::Path,
+    ) -> Result<rcgen::KeyPair, Box<dyn std::error::Error>> {
+        let key_path = cert_dir.join("llm-firewall-ca.key");
+        let pem_bytes = std::fs::read(&key_path)?;
+        let pem_str = String::from_utf8(pem_bytes)?;
+        Ok(rcgen::KeyPair::from_pem(&pem_str)?)
+    }
+
+    pub fn load_cert_der(
+        cert_dir: &std::path::Path,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let cert_path = cert_dir.join("llm-firewall-ca.pem");
+        let pem_bytes = std::fs::read(&cert_path)?;
+        let mut reader = std::io::BufReader::new(std::io::Cursor::new(pem_bytes));
+        for item in rustls_pemfile::read_all(&mut reader) {
+            match item {
+                Ok(rustls_pemfile::Item::X509Certificate(cert)) => return Ok(cert.to_vec()),
+                _ => continue,
+            }
+        }
+        Err("No X509 certificate found in PEM file".into())
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,6 +7,7 @@
 //! - [`proxy::chat_completions_handler`]: PII-intercepting chat completions handler
 //! - [`proxy::ProxyError`]: proxy error type with HTTP response mapping
 
+pub mod connect;
 pub mod proxy;
 
 use axum::{routing::get, Router};
@@ -38,6 +39,10 @@ pub struct AppState {
     /// Optional non-blocking channel sender for audit telemetry event logging.
     pub telemetry_tx:
         Option<tokio::sync::mpsc::UnboundedSender<guardian_core::telemetry::TelemetryEvent>>,
+    /// Optional CA KeyPair for MITM certificate generation.
+    pub ca_key_pair: Option<Arc<rcgen::KeyPair>>,
+    /// Optional CA Certificate DER for MITM certificate generation.
+    pub ca_cert_der: Option<Arc<Vec<u8>>>,
 }
 
 /// Builds the Axum [`Router`] with all proxy routes attached to `state`.

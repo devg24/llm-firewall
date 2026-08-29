@@ -50,6 +50,8 @@ fn make_state(upstream_addr: std::net::SocketAddr) -> AppState {
         guardian_config: None,
         preflight_plan: None,
         telemetry_tx: None,
+        ca_cert_der: None,
+        ca_key_pair: None,
     }
 }
 
@@ -285,6 +287,7 @@ async fn test_token_map_is_per_request_not_in_app_state() {
         "HTTP/1.1 200 OK\r\n\
          Content-Type: application/json\r\n\
          Content-Length: {}\r\n\
+         Connection: close\r\n\
          \r\n\
          {}",
         json_body.len(),

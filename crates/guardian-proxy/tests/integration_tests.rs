@@ -36,6 +36,8 @@ async fn test_health_endpoint() {
         guardian_config: None,
         preflight_plan: None,
         telemetry_tx: None,
+        ca_cert_der: None,
+        ca_key_pair: None,
     };
 
     let app = create_app(state);
@@ -130,6 +132,8 @@ async fn test_proxy_transparent_fallback() {
         guardian_config: None,
         preflight_plan: None,
         telemetry_tx: None,
+        ca_cert_der: None,
+        ca_key_pair: None,
     };
 
     let proxy_app = create_app(state);
@@ -282,6 +286,8 @@ async fn test_proxy_chat_completions_success() {
         guardian_config: None,
         preflight_plan: None,
         telemetry_tx: None,
+        ca_cert_der: None,
+        ca_key_pair: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -374,6 +380,8 @@ async fn test_proxy_chat_completions_complex() {
         guardian_config: None,
         preflight_plan: None,
         telemetry_tx: None,
+        ca_cert_der: None,
+        ca_key_pair: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -463,6 +471,8 @@ async fn test_proxy_chat_completions_too_large() {
         guardian_config: None,
         preflight_plan: None,
         telemetry_tx: None,
+        ca_cert_der: None,
+        ca_key_pair: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -506,6 +516,8 @@ async fn test_proxy_chat_completions_fail_closed() {
         guardian_config: None,
         preflight_plan: None,
         telemetry_tx: None,
+        ca_cert_der: None,
+        ca_key_pair: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -603,6 +615,8 @@ async fn test_proxy_domain_crypto_entropy_and_tier1_redaction() {
         guardian_config: None,
         preflight_plan: None,
         telemetry_tx: None,
+        ca_cert_der: None,
+        ca_key_pair: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -719,6 +733,8 @@ async fn test_proxy_power_user_guardian_toml_custom_rules_and_allowlist() {
         guardian_config,
         preflight_plan: None,
         telemetry_tx: None,
+        ca_cert_der: None,
+        ca_key_pair: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -847,6 +863,8 @@ async fn test_proxy_with_approved_preflight_plan() {
         guardian_config: None,
         preflight_plan: Some(std::sync::Arc::new(plan)),
         telemetry_tx: None,
+        ca_cert_der: None,
+        ca_key_pair: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -940,6 +958,8 @@ async fn test_proxy_preflight_plan_sandbox_blocking() {
         guardian_config: None,
         preflight_plan: Some(std::sync::Arc::new(plan)),
         telemetry_tx: None,
+        ca_cert_der: None,
+        ca_key_pair: None,
     };
     let proxy_app = create_app(state);
     let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1066,6 +1086,8 @@ async fn test_telemetry_event_logging_through_proxy() {
         guardian_config: None,
         preflight_plan: Some(std::sync::Arc::new(plan)),
         telemetry_tx: Some(telemetry_tx.clone()),
+        ca_cert_der: None,
+        ca_key_pair: None,
     };
 
     let proxy_app = create_app(state);
@@ -1197,4 +1219,47 @@ async fn test_telemetry_event_logging_through_proxy() {
     assert!(md_report.contains("LLM Firewall — Compliance & Security Audit Report"));
     assert!(md_report.contains("req-test-pii-1"));
     assert!(md_report.contains("req-test-sandbox-2"));
+}
+
+#[tokio::test]
+async fn connect_tunnel_reverse_proxy_unchanged() {
+    let client = make_test_client();
+    let upstream_url = reqwest::Url::parse("https://api.openai.com").unwrap();
+    let state = AppState {
+        client,
+        upstream_url,
+        model: None,
+        domain: guardian_core::DomainProfile::Standard,
+        guardian_config: None,
+        preflight_plan: None,
+        telemetry_tx: None,
+        ca_cert_der: None,
+        ca_key_pair: None,
+    };
+
+    let app = create_app(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    let server_handle = tokio::spawn(async move {
+        guardian_proxy::connect::accept_loop(listener, app, state, async move {
+            let _ = rx.await;
+        })
+        .await;
+    });
+
+    let client = make_test_client();
+    let response = client
+        .get(format!("http://{}/health", addr))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let text = response.text().await.unwrap();
+    assert_eq!(text, "OK");
+
+    let _ = tx.send(());
+    server_handle.await.unwrap();
 }

@@ -138,7 +138,7 @@ impl ConfigPatcher {
             }
             base.push_str("\n  \"http.proxy\": \"");
             base.push_str(proxy_url);
-            base.push_str("\",\n  \"http.proxyStrictSSL\": false\n}");
+            base.push_str("\",\n  \"http.proxyStrictSSL\": true,\n  \"http.proxySupport\": \"override\",\n  \"cursor.general.disableHttp2\": true\n}");
             return base;
         }
 
@@ -148,7 +148,12 @@ impl ConfigPatcher {
                     "http.proxy".to_string(),
                     Value::String(proxy_url.to_string()),
                 );
-                obj.insert("http.proxyStrictSSL".to_string(), Value::Bool(false));
+                obj.insert("http.proxyStrictSSL".to_string(), Value::Bool(true));
+                obj.insert(
+                    "http.proxySupport".to_string(),
+                    Value::String("override".to_string()),
+                );
+                obj.insert("cursor.general.disableHttp2".to_string(), Value::Bool(true));
                 return serde_json::to_string_pretty(&v).unwrap_or(content.to_string());
             }
         }
@@ -203,7 +208,9 @@ mod tests {
         let proxy_url = "http://127.0.0.1:3000";
         let patched = ConfigPatcher::patch_json_string(content, proxy_url);
         assert!(patched.contains("\"http.proxy\": \"http://127.0.0.1:3000\""));
-        assert!(patched.contains("\"http.proxyStrictSSL\": false"));
+        assert!(patched.contains("\"http.proxyStrictSSL\": true"));
+        assert!(patched.contains("\"http.proxySupport\": \"override\""));
+        assert!(patched.contains("\"cursor.general.disableHttp2\": true"));
     }
 
     #[test]
@@ -224,5 +231,8 @@ mod tests {
         let patched = ConfigPatcher::patch_json_string(content, proxy_url);
         assert!(!patched.contains("old:8080"));
         assert!(patched.contains("\"http.proxy\": \"http://127.0.0.1:3000\""));
+        assert!(patched.contains("\"http.proxyStrictSSL\": true"));
+        assert!(patched.contains("\"http.proxySupport\": \"override\""));
+        assert!(patched.contains("\"cursor.general.disableHttp2\": true"));
     }
 }

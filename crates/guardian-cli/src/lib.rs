@@ -216,6 +216,24 @@ async fn run_server_internal() {
     let (telemetry_tx, telemetry_writer) =
         guardian_core::telemetry::TelemetryWriter::new(audit_log_path);
 
+    // Load CA key/cert
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let cert_dir = std::path::PathBuf::from(home).join(".llm-firewall-certs");
+    let ca_key_pair = match ca::LocalCA::load_key_pair(&cert_dir) {
+        Ok(kp) => Some(std::sync::Arc::new(kp)),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load CA key pair: {}. MITM CONNECT tunnels will fail.",
+                e
+            );
+            None
+        }
+    };
+    let ca_cert_der = match ca::LocalCA::load_cert_der(&cert_dir) {
+        Ok(der_bytes) => Some(std::sync::Arc::new(der_bytes)),
+        Err(_) => None,
+    };
+
     let state = AppState {
         client,
         upstream_url,
@@ -224,9 +242,11 @@ async fn run_server_internal() {
         guardian_config,
         preflight_plan,
         telemetry_tx: Some(telemetry_tx.clone()),
+        ca_key_pair,
+        ca_cert_der,
     };
 
-    let app = create_app(state);
+    let app = create_app(state.clone());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = match tokio::net::TcpListener::bind(addr).await {
@@ -243,20 +263,16 @@ async fn run_server_internal() {
         bound_addr
     );
 
-    if let Err(e) = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-    {
-        tracing::error!("Server error: {}", e);
-    }
+    guardian_proxy::connect::accept_loop(listener, app, state, shutdown_signal()).await;
 
     drop(telemetry_tx);
-    let _ = telemetry_writer.handle.await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), telemetry_writer.handle).await;
 }
 
 pub async fn run_server_with_trust() {
     init_logging();
-    let ca_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let ca_dir = std::path::PathBuf::from(home);
     let cert_dir = ca_dir.join(".llm-firewall-certs");
 
     let ca = match ca::LocalCA::new(&cert_dir) {
