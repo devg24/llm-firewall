@@ -8,3 +8,8 @@ model/
 *.pem
 *.key
 *.crt
+
+# Archived and ephemeral docs
+docs/archive/
+docs/project-scan-report.json
+docs/source-tree-analysis.md

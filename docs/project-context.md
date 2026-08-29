@@ -1,7 +1,7 @@
 ---
 project_name: 'llm-firewall-rs'
 user_name: 'Dev Goyal'
-date: '2026-08-19'
+date: '2026-08-29'
 sections_completed: ['technology_stack', 'language_rules', 'framework_rules', 'testing_rules', 'quality_rules', 'workflow_rules', 'anti_patterns']
 status: 'complete'
 rule_count: 20
@@ -20,9 +20,10 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Async Runtime**: Tokio 1.52.3
 - **Web Framework**: Axum 0.8.9
 - **HTTP Client**: Reqwest 0.13.4
-- **Logging**: Tracing 0.1 / Tracing-subscriber 0.3
+- **Logging & Telemetry**: Tracing 0.1 / Tracing-subscriber 0.3, custom non-blocking JSONL streaming for audit logs
 - **Machine Learning**: ort 2.0 (Primary for Tier 4 Inference) & Candle (candle-core 0.10.2 for Tier 3 BERT NER)
 - **Serialization**: Serde 1.0 / Serde_json 1.0
+- **TLS/Crypto**: rustls 0.23, tokio-rustls 0.26, rcgen 0.14.7 (for MITM local CA generation)
 
 ## Critical Implementation Rules
 
@@ -75,6 +76,9 @@ _Documented after discovery phase_
 - **PII Leakage in Error Responses**: Never echo back raw user input verbatim in HTTP error responses (e.g., 400 Bad Request). It may contain un-redacted sensitive data or prompt injections.
 - **Server-Side Request Forgery (SSRF)**: When parsing `UPSTREAM_URL` or proxying requests, validate the destination. Do not blindly proxy to internal network addresses unless explicitly intended.
 - **Header Forwarding**: When proxying requests, carefully strip sensitive headers (like `Authorization` if swapping keys, or `Host`) before forwarding to the upstream LLM provider to avoid security and routing issues.
+- **MITM Certificate Generation**: Certificates minted on the fly via `rcgen` for domain spoofing must be properly cached and tied to the Local CA generated during first-run.
+- **Configuration Fallbacks**: When parsing `.guardian.toml` or repository manifests (`Cargo.toml`, `package.json`), always provide fail-safe defaults. Never panic on a malformed workspace config.
+- **Telemetry File I/O**: Audit logs and \"scare reports\" must use thread-safe, non-blocking asynchronous file writing (e.g., streaming JSONL). Avoid global locks on file descriptors.
 
 ---
 
@@ -94,4 +98,4 @@ _Documented after discovery phase_
 - Review quarterly for outdated rules
 - Remove rules that become obvious over time
 
-Last Updated: 2026-08-19
+Last Updated: 2026-08-29
