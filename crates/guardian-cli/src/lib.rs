@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 pub mod ca;
+pub mod exec;
 pub mod patcher;
 pub mod preflight;
 pub mod report;
@@ -130,17 +131,49 @@ async fn run_server_internal() {
         std::process::exit(1);
     });
 
+    let (state, telemetry_writer) = match build_app_state(upstream_url) {
+        Ok(res) => res,
+        Err(e) => {
+            tracing::error!("Fatal: Failed to initialize application state: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let telemetry_tx = state.telemetry_tx.clone();
+    let app = create_app(state.clone());
+
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = match tokio::net::TcpListener::bind(addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("Failed to bind to port {}: {}", port, e);
+            return;
+        }
+    };
+
+    let bound_addr = listener.local_addr().unwrap_or(addr);
+    tracing::info!(
+        "Server started successfully and listening on {}",
+        bound_addr
+    );
+
+    guardian_proxy::connect::accept_loop(listener, app, state, shutdown_signal()).await;
+
+    drop(telemetry_tx);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), telemetry_writer.handle).await;
+}
+
+/// Builds the shared [`AppState`] and initializes the audit telemetry writer.
+pub fn build_app_state(
+    upstream_url: reqwest::Url,
+) -> Result<(AppState, guardian_core::telemetry::TelemetryWriter), Box<dyn std::error::Error>> {
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .read_timeout(std::time::Duration::from_secs(300))
         .no_gzip()
         .no_brotli()
         .no_deflate()
-        .build()
-        .unwrap_or_else(|e| {
-            tracing::error!("Fatal: Failed to initialize reqwest client: {}", e);
-            std::process::exit(1);
-        });
+        .build()?;
 
     let mut model_dir = std::env::var("MODEL_DIR")
         .unwrap_or_default()
@@ -188,51 +221,40 @@ async fn run_server_internal() {
     );
 
     let preflight_plan_path = cwd.join(".guardian-plan.json");
-    let preflight_plan = match guardian_core::plan::PreflightPlan::load_from_file(
-        &preflight_plan_path,
-    ) {
-        Ok(Some(plan)) if plan.approved => {
-            tracing::info!(
-                version = plan.version,
-                zones = plan.sensitive_zones.len(),
-                "Loaded active pre-flight security plan (.guardian-plan.json)"
-            );
-            Some(std::sync::Arc::new(plan))
-        }
-        Ok(Some(_)) => {
-            tracing::warn!(
+    let preflight_plan =
+        match guardian_core::plan::PreflightPlan::load_from_file(&preflight_plan_path) {
+            Ok(Some(plan)) if plan.approved => {
+                tracing::info!(
+                    version = plan.version,
+                    zones = plan.sensitive_zones.len(),
+                    "Loaded active pre-flight security plan (.guardian-plan.json)"
+                );
+                Some(std::sync::Arc::new(plan))
+            }
+            Ok(Some(_)) => {
+                tracing::warn!(
                 ".guardian-plan.json exists but is not approved. Operating without preflight plan."
             );
-            None
-        }
-        Ok(None) => None,
-        Err(e) => {
-            tracing::error!(error = %e, "Fatal: .guardian-plan.json is corrupt or unreadable. Failing closed.");
-            std::process::exit(1);
-        }
-    };
+                None
+            }
+            Ok(None) => None,
+            Err(e) => {
+                return Err(format!(".guardian-plan.json is corrupt or unreadable: {}", e).into());
+            }
+        };
 
     let audit_log_path = guardian_core::telemetry::default_audit_log_path();
     let (telemetry_tx, telemetry_writer) =
         guardian_core::telemetry::TelemetryWriter::new(audit_log_path);
 
-    // Load CA key/cert
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     let cert_dir = std::path::PathBuf::from(home).join(".llm-firewall-certs");
-    let ca_key_pair = match ca::LocalCA::load_key_pair(&cert_dir) {
-        Ok(kp) => Some(std::sync::Arc::new(kp)),
-        Err(e) => {
-            tracing::warn!(
-                "Failed to load CA key pair: {}. MITM CONNECT tunnels will fail.",
-                e
-            );
-            None
-        }
-    };
-    let ca_cert_der = match ca::LocalCA::load_cert_der(&cert_dir) {
-        Ok(der_bytes) => Some(std::sync::Arc::new(der_bytes)),
-        Err(_) => None,
-    };
+    let ca_key_pair = ca::LocalCA::load_key_pair(&cert_dir)
+        .ok()
+        .map(std::sync::Arc::new);
+    let ca_cert_der = ca::LocalCA::load_cert_der(&cert_dir)
+        .ok()
+        .map(std::sync::Arc::new);
 
     let state = AppState {
         client,
@@ -241,32 +263,66 @@ async fn run_server_internal() {
         domain,
         guardian_config,
         preflight_plan,
-        telemetry_tx: Some(telemetry_tx.clone()),
+        telemetry_tx: Some(telemetry_tx),
         ca_key_pair,
         ca_cert_der,
     };
 
-    let app = create_app(state.clone());
+    Ok((state, telemetry_writer))
+}
 
-    let addr = SocketAddr::from(([0, 0, 0, 0], port));
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("Failed to bind to port {}: {}", port, e);
-            return;
+/// A running ephemeral proxy server instance.
+pub struct EphemeralServer {
+    /// Port number the ephemeral server is listening on.
+    pub port: u16,
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    server_handle: tokio::task::JoinHandle<()>,
+}
+
+impl EphemeralServer {
+    /// Gracefully stops the ephemeral server.
+    pub async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
         }
-    };
+        let _ = self.server_handle.await;
+    }
+}
 
-    let bound_addr = listener.local_addr().unwrap_or(addr);
-    tracing::info!(
-        "Server started successfully and listening on {}",
-        bound_addr
-    );
+/// Starts an ephemeral proxy server on `127.0.0.1:<port>` (pass 0 for OS-assigned port).
+pub async fn start_ephemeral_server(
+    port: u16,
+) -> Result<EphemeralServer, Box<dyn std::error::Error>> {
+    guardian_core::init_regexes();
 
-    guardian_proxy::connect::accept_loop(listener, app, state, shutdown_signal()).await;
+    let upstream_var = std::env::var("UPSTREAM_URL");
+    let upstream_url = parse_upstream_url(upstream_var)
+        .unwrap_or_else(|_| reqwest::Url::parse("https://api.openai.com").unwrap());
 
-    drop(telemetry_tx);
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), telemetry_writer.handle).await;
+    let (state, telemetry_writer) = build_app_state(upstream_url)?;
+    let telemetry_tx = state.telemetry_tx.clone();
+
+    let app = create_app(state.clone());
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound_port = listener.local_addr()?.port();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let server_handle = tokio::spawn(async move {
+        guardian_proxy::connect::accept_loop(listener, app, state, async move {
+            let _ = shutdown_rx.await;
+        })
+        .await;
+        drop(telemetry_tx);
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_secs(2), telemetry_writer.handle).await;
+    });
+
+    Ok(EphemeralServer {
+        port: bound_port,
+        shutdown_tx: Some(shutdown_tx),
+        server_handle,
+    })
 }
 
 pub async fn run_server_with_trust() {
@@ -382,6 +438,20 @@ pub async fn run_cli() {
                 run_server_with_trust().await;
                 return;
             }
+            "exec" => {
+                let cmd_args: Vec<String> = if args.len() > 2 && args[2] == "--" {
+                    args[3..].to_vec()
+                } else {
+                    args[2..].to_vec()
+                };
+                match exec::run_exec(&cmd_args).await {
+                    Ok(code) => std::process::exit(code),
+                    Err(e) => {
+                        eprintln!("Exec error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
             "--help" | "-h" => {
                 println!("LLM Firewall — Security & Compliance Proxy for Local LLMs");
                 println!();
@@ -390,6 +460,7 @@ pub async fn run_cli() {
                 println!();
                 println!("COMMANDS:");
                 println!("    scan                  Scan repository for unprotected secrets and sensitive files");
+                println!("    exec -- <cmd>         Run an agent (Claude Code, etc.) supervised with isolated proxy env");
                 println!("    on                    Start transparent MITM proxy with automatic CA installation");
                 println!("    preflight             Generate or approve an unattended pre-flight security plan");
                 println!("    stats                 Display aggregate security metrics and estimated risk avoided");

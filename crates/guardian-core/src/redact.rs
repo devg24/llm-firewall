@@ -416,6 +416,41 @@ pub async fn process_completions_payload_with_orchestrator(
     Ok(())
 }
 
+/// Processes an Anthropic Messages API payload (`/v1/messages`).
+///
+/// In Anthropic's format:
+/// - `system` can be an optional string or an array of content blocks (e.g. `[{"type": "text", "text": "..."}]`).
+/// - `messages` is an array of message objects, where each message has a `content` field
+///   which can be either a string or an array of content blocks (`[{"type": "text", "text": "..."}]`).
+pub async fn process_anthropic_payload_with_orchestrator(
+    payload: &mut serde_json::Value,
+    token_map: &std::sync::Arc<std::sync::Mutex<crate::token_map::TokenMap>>,
+    orchestrator: &crate::orchestrator::DetectionOrchestrator,
+) -> Result<(), crate::CoreError> {
+    // 1. Redact top-level system prompt if present
+    if let Some(system) = payload.get_mut("system") {
+        mutate_content_field_with_orchestrator(system, token_map, orchestrator, 0).await;
+    }
+
+    // 2. Redact messages array
+    let messages = payload
+        .get_mut("messages")
+        .and_then(|m| m.as_array_mut())
+        .ok_or_else(|| {
+            crate::CoreError::PayloadValidation(
+                "Missing or invalid 'messages' array in Anthropic payload".to_string(),
+            )
+        })?;
+
+    for message in messages {
+        if let Some(content) = message.get_mut("content") {
+            mutate_content_field_with_orchestrator(content, token_map, orchestrator, 0).await;
+        }
+    }
+
+    Ok(())
+}
+
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
 
@@ -754,5 +789,51 @@ mod tests {
             msg2["content"],
             "Same phone: [REDACTED_PHONE_1] and name John Doe [REDACTED_SSN_1]"
         );
+    }
+
+    #[tokio::test]
+    async fn test_process_anthropic_payload_with_orchestrator() {
+        use std::sync::{Arc, Mutex};
+        init_regexes();
+        let token_map = Arc::new(Mutex::new(crate::token_map::TokenMap::new()));
+        let orchestrator = crate::orchestrator::DetectionOrchestrator::new(None);
+
+        let mut payload = serde_json::json!({
+            "model": "claude-3-7-sonnet-20250219",
+            "system": "System instructions with secret AKIAIOSFODNN7EXAMPLE",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Please reach out to support@acme-corp.com regarding my account"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        process_anthropic_payload_with_orchestrator(&mut payload, &token_map, &orchestrator)
+            .await
+            .unwrap();
+
+        assert!(payload["system"]
+            .as_str()
+            .unwrap()
+            .contains("[REDACTED_AWS_1]"));
+        assert!(!payload["system"]
+            .as_str()
+            .unwrap()
+            .contains("AKIAIOSFODNN7EXAMPLE"));
+
+        let content_text = payload["messages"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(content_text.contains("[REDACTED_EMAIL_1]"));
+        assert!(!content_text.contains("support@acme-corp.com"));
+
+        let lock = token_map.lock().unwrap();
+        assert_eq!(lock.len(), 2);
     }
 }

@@ -53,6 +53,20 @@ async fn main() {
                 guardian_cli::run_server_with_trust().await;
                 return;
             }
+            "exec" => {
+                let cmd_args: Vec<String> = if args.len() > 2 && args[2] == "--" {
+                    args[3..].to_vec()
+                } else {
+                    args[2..].to_vec()
+                };
+                match guardian_cli::exec::run_exec(&cmd_args).await {
+                    Ok(code) => std::process::exit(code),
+                    Err(e) => {
+                        eprintln!("Exec error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
             "--help" | "-h" => {
                 println!("LLM Firewall — Security & Compliance Proxy for Local LLMs");
                 println!();
@@ -61,11 +75,15 @@ async fn main() {
                 println!();
                 println!("COMMANDS:");
                 println!("    scan                  Scan repository for unprotected secrets and sensitive files");
+                println!("    exec -- <cmd>         Run an agent (Claude Code, etc.) supervised with isolated proxy env");
                 println!("    preflight             Generate or approve an unattended pre-flight security plan");
                 println!("    stats                 Display aggregate security metrics and estimated risk avoided");
                 println!("    report                Generate SOC 2 / HIPAA / GDPR compliance audit reports");
                 println!("    on                    Start transparent MITM proxy with automatic CA installation");
                 println!("    [default]             Start standard proxy server");
+                println!();
+                println!("OPTIONS:");
+                println!("    -h, --help            Print help information");
                 return;
             }
             _ => {}

@@ -5,11 +5,11 @@ use axum::{
     http::{HeaderMap, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
 };
-use futures_util::StreamExt;
 use guardian_core::TokenMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::sse::create_sse_response_stream;
 pub use guardian_core::telemetry::{spawn_telemetry_writer, TelemetryWriter};
 
 pub struct SyncStream<S>(std::sync::Mutex<S>);
@@ -756,236 +756,13 @@ pub async fn chat_completions_handler(
         // Strip Content-Length — SSE is always streamed/chunked, never fixed-length.
         res_headers.remove(axum::http::header::CONTENT_LENGTH);
 
-        // Clone Arc for capture in the stream closure (unused in Story 3.1 — stub for 3.2).
-        let _token_map = Arc::clone(&token_map_arc);
-
-        // Build SSE passthrough stream using StreamExt combinators (AD-15: no manual poll_next).
-        // State: (upstream_stream, pending_events_buf, raw_byte_buf, done)
-        // We use unfold to drive the upstream bytes_stream and emit one complete SSE event
-        // per iteration, buffering partial data between polls.
-        let upstream_stream = response.bytes_stream();
-
-        type UpstreamStream =
-            dyn futures_core::Stream<Item = Result<bytes::Bytes, reqwest::Error>> + Send + Unpin;
-        struct SseState {
-            upstream: Box<UpstreamStream>,
-            buf: Vec<u8>,
-            pending: Vec<bytes::Bytes>,
-            done: bool,
-            token_map: Arc<std::sync::Mutex<TokenMap>>,
-            fragment_buf: String,
-            lookbehind: String,
-            sink_detector: guardian_core::DangerousSinkDetector,
-            telemetry_tx: Option<
-                tokio::sync::mpsc::UnboundedSender<guardian_core::telemetry::TelemetryEvent>,
-            >,
-            request_id: String,
-            model: Option<String>,
-        }
-
-        impl SseState {
-            fn process_event(&mut self, event: Vec<u8>) -> Vec<u8> {
-                let event_str = match std::str::from_utf8(&event) {
-                    Ok(s) => s,
-                    Err(_) => return event,
-                };
-
-                if !event_str.starts_with("data: ") {
-                    return event;
-                }
-
-                let data_str = event_str.trim_start_matches("data: ").trim_end();
-                if data_str == "[DONE]" {
-                    return event;
-                }
-
-                let mut parsed: serde_json::Value = match serde_json::from_str(data_str) {
-                    Ok(v) => v,
-                    Err(_) => return event,
-                };
-
-                let mut modified = false;
-                if let Some(choices) = parsed.get_mut("choices").and_then(|c| c.as_array_mut()) {
-                    for choice in choices {
-                        let content_target = if let Some(delta) = choice.get_mut("delta") {
-                            delta.get_mut("content")
-                        } else if let Some(message) = choice.get_mut("message") {
-                            message.get_mut("content")
-                        } else {
-                            None
-                        };
-
-                        if let Some(serde_json::Value::String(content)) = content_target {
-                            self.lookbehind.push_str(content.as_str());
-                            if self.lookbehind.len() > 512 {
-                                let trim_pos = self.lookbehind.len() - 512;
-                                let mut char_pos = trim_pos;
-                                while char_pos < self.lookbehind.len()
-                                    && !self.lookbehind.is_char_boundary(char_pos)
-                                {
-                                    char_pos += 1;
-                                }
-                                self.lookbehind = self.lookbehind[char_pos..].to_string();
-                            }
-
-                            let to_scan = self.fragment_buf.clone() + content.as_str();
-
-                            let mut partial = String::new();
-                            let mut full_content_to_replace = to_scan.clone();
-
-                            if let Some(incomplete_start) = to_scan.rfind("[REDACT") {
-                                if !to_scan[incomplete_start..].contains(']') {
-                                    partial = to_scan[incomplete_start..].to_string();
-                                    full_content_to_replace =
-                                        to_scan[..incomplete_start].to_string();
-                                }
-                            }
-
-                            self.fragment_buf = partial;
-
-                            let (tokens, original_values) = {
-                                let lock = self.token_map.lock().unwrap();
-                                let mut tokens = Vec::new();
-                                let mut original_values = Vec::new();
-                                for k in lock.keys() {
-                                    if let Some((secret, _)) = lock.get(k) {
-                                        tokens.push(k.clone());
-                                        original_values.push(secret.clone());
-                                    }
-                                }
-                                (tokens, original_values)
-                            };
-
-                            let final_content = if !tokens.is_empty() {
-                                let is_dangerous =
-                                    self.sink_detector.is_dangerous_context(&self.lookbehind);
-                                if is_dangerous {
-                                    tracing::warn!(
-                                        lookbehind = %self.lookbehind,
-                                        "Dangerous sink context detected, blocking token re-injection"
-                                    );
-                                    if let Some(ref tx) = self.telemetry_tx {
-                                        let ev = guardian_core::telemetry::TelemetryEvent {
-                                            timestamp: guardian_core::telemetry::TelemetryEvent::current_timestamp(),
-                                            request_id: self.request_id.clone(),
-                                            event_type: guardian_core::telemetry::TelemetryEventType::SinkBlocked,
-                                            tier_triggered: Some(guardian_core::telemetry::DetectionTier::DangerousSink),
-                                            secret_types: Vec::new(),
-                                            redacted_count: 0,
-                                            sandbox_violation: None,
-                                            model: self.model.clone(),
-                                            latency_ms: 0,
-                                            estimated_cost_saved_usd: 2500.0,
-                                        };
-                                        let _ = tx.send(ev);
-                                    }
-                                    full_content_to_replace
-                                } else {
-                                    match aho_corasick::AhoCorasick::new(&tokens) {
-                                        Ok(ac) => ac.replace_all(
-                                            &full_content_to_replace,
-                                            &original_values,
-                                        ),
-                                        Err(e) => {
-                                            tracing::error!(error = %e, "Failed to build AhoCorasick automaton for token re-injection");
-                                            full_content_to_replace
-                                        }
-                                    }
-                                }
-                            } else {
-                                full_content_to_replace
-                            };
-
-                            if final_content != content.as_str() {
-                                *content = final_content;
-                                modified = true;
-                            }
-                        }
-                    }
-                }
-
-                if modified {
-                    let mut new_event = String::from("data: ");
-                    new_event.push_str(&serde_json::to_string(&parsed).unwrap());
-                    new_event.push_str("\n\n");
-                    return new_event.into_bytes();
-                }
-
-                event
-            }
-        }
-
-        let state = SseState {
-            upstream: Box::new(upstream_stream),
-            buf: Vec::new(),
-            pending: Vec::new(),
-            done: false,
-            token_map: token_map_arc,
-            fragment_buf: String::new(),
-            lookbehind: String::new(),
-            sink_detector: guardian_core::DangerousSinkDetector::new(),
-            telemetry_tx: state.telemetry_tx.clone(),
-            request_id: request_id.clone(),
-            model: model_name.clone(),
-        };
-
-        let output_stream = futures_util::stream::unfold(state, |mut s| async move {
-            // If we have a queued event from a previous iteration, emit it first.
-            if let Some(event) = s.pending.pop() {
-                return Some((Ok::<bytes::Bytes, axum::Error>(event), s));
-            }
-
-            if s.done {
-                // Flush remaining bytes as a final item if any.
-                if !s.buf.is_empty() {
-                    let remaining = bytes::Bytes::from(std::mem::take(&mut s.buf));
-                    return Some((Ok(remaining), s));
-                }
-                return None;
-            }
-
-            // Pull chunks from upstream until we can emit at least one complete event.
-            loop {
-                // Check if we have a complete event in the buffer.
-                if let Some(pos) = find_double_newline(&s.buf) {
-                    let event: Vec<u8> = s.buf.drain(..pos).collect();
-                    let processed_event = s.process_event(event);
-
-                    // Collect any additional complete events into pending (LIFO pop, so reverse).
-                    let mut extra = Vec::new();
-                    while let Some(p2) = find_double_newline(&s.buf) {
-                        let ev2: Vec<u8> = s.buf.drain(..p2).collect();
-                        let processed_ev2 = s.process_event(ev2);
-                        extra.push(bytes::Bytes::from(processed_ev2));
-                    }
-                    extra.reverse();
-                    s.pending = extra;
-                    return Some((Ok(bytes::Bytes::from(processed_event)), s));
-                }
-
-                // Need more bytes — poll upstream.
-                match s.upstream.next().await {
-                    Some(Ok(chunk)) => {
-                        s.buf.extend_from_slice(&chunk);
-                    }
-                    Some(Err(e)) => {
-                        s.done = true;
-                        return Some((Err(axum::Error::new(e)), s));
-                    }
-                    None => {
-                        // Upstream ended; flush remainder if any, then stop.
-                        s.done = true;
-                        if !s.buf.is_empty() {
-                            let remaining = bytes::Bytes::from(std::mem::take(&mut s.buf));
-                            return Some((Ok(remaining), s));
-                        }
-                        return None;
-                    }
-                }
-            }
-        });
-
-        Body::from_stream(output_stream)
+        create_sse_response_stream(
+            response,
+            token_map_arc,
+            state.telemetry_tx.clone(),
+            request_id,
+            model_name,
+        )
     } else {
         // Non-SSE: passthrough unchanged (AC-3)
         Body::from_stream(response.bytes_stream())
@@ -1005,13 +782,339 @@ pub async fn chat_completions_handler(
     }))
 }
 
-/// Find the end boundary of the first complete SSE event in `buf`.
+/// Handles Anthropic Messages API requests (`/v1/messages`).
 ///
-/// Returns `Some(pos)` where `pos` is the index *after* the `\n\n` delimiter,
-/// i.e. `buf[..pos]` is the complete event including both newlines.
-/// Returns `None` if no `\n\n` boundary is found.
-fn find_double_newline(buf: &[u8]) -> Option<usize> {
-    buf.windows(2).position(|w| w == b"\n\n").map(|pos| pos + 2)
+/// Features:
+/// - Intercepts inbound Anthropic JSON payloads (`system`, `messages[].content`).
+/// - Swaps detected secrets and PII with reversible tokens (`[REDACTED_*]`).
+/// - Injects guard instructions into the `system` prompt to ensure Claude preserves tokens.
+/// - Multiplexes upstream target URL: points to `https://api.anthropic.com` (or `ANTHROPIC_UPSTREAM_URL` / custom).
+/// - Transparently mutates return SSE streams (`event: content_block_delta`), restoring tokens in safe context.
+/// - Employs lookbehind sink detection to prevent exfiltration into `curl`, `eval`, or shell commands.
+pub async fn anthropic_messages_handler(
+    State(state): State<AppState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, ProxyError> {
+    let start_time = Instant::now();
+
+    // 1. Enforce payload limit
+    let limit = 5 * 1024 * 1024;
+    let bytes = axum::body::to_bytes(body, limit).await.map_err(|e| {
+        use std::error::Error;
+        let is_limit = e
+            .source()
+            .map(|src| src.to_string().to_lowercase().contains("limit"))
+            .unwrap_or(false)
+            || e.to_string().to_lowercase().contains("limit");
+        if is_limit {
+            ProxyError::PayloadTooLarge
+        } else {
+            ProxyError::Internal(e.to_string())
+        }
+    })?;
+
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            format!(
+                "req-anthropic-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            )
+        });
+
+    let mut payload: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| ProxyError::BadRequest(format!("Invalid JSON payload: {}", e)))?;
+
+    let model_name = payload
+        .get("model")
+        .and_then(|m| m.as_str())
+        .map(|s| s.to_string());
+
+    // Check preflight plan sandbox violations
+    if let Some(ref plan) = state.preflight_plan {
+        if plan.sandbox.enforce_jailing {
+            if let Err(err) = inspect_json_for_sandbox_violations(&payload, &plan.sandbox) {
+                if let Some(ref tx) = state.telemetry_tx {
+                    let cost_model = guardian_core::telemetry::CostModel::default();
+                    let event = guardian_core::telemetry::TelemetryEvent {
+                        timestamp: guardian_core::telemetry::TelemetryEvent::current_timestamp(),
+                        request_id: request_id.clone(),
+                        event_type: guardian_core::telemetry::TelemetryEventType::SandboxBlocked,
+                        tier_triggered: Some(guardian_core::telemetry::DetectionTier::SandboxJail),
+                        secret_types: Vec::new(),
+                        redacted_count: 0,
+                        sandbox_violation: Some(format!("{:?}", err)),
+                        model: model_name.clone(),
+                        latency_ms: start_time.elapsed().as_millis() as u64,
+                        estimated_cost_saved_usd: cost_model.sandbox_violation_usd,
+                    };
+                    let _ = tx.send(event);
+                }
+                if headers.contains_key("x-firewall-mitm") {
+                    let host = headers.get("host").and_then(|h| h.to_str().ok());
+                    let reason = format!("{:?}", err);
+                    return Ok(make_dynamic_block_response(&payload, host, &reason));
+                }
+                return Err(err);
+            }
+        }
+    }
+
+    // Instantiate per-request TokenMap
+    let token_map_arc = Arc::new(std::sync::Mutex::new(TokenMap::new()));
+
+    // Run Orchestrator Pipeline
+    let orchestrator = guardian_core::orchestrator::DetectionOrchestrator::with_config(
+        state.model.clone(),
+        state.domain,
+        state.guardian_config.as_ref(),
+    );
+    guardian_core::redact::process_anthropic_payload_with_orchestrator(
+        &mut payload,
+        &token_map_arc,
+        &orchestrator,
+    )
+    .await
+    .map_err(|e| ProxyError::BadRequest(format!("Pipeline failure: {}", e)))?;
+
+    // Record Telemetry
+    let (redacted_count, secret_types) = {
+        let lock = token_map_arc.lock().unwrap();
+        (lock.len(), lock.secret_types())
+    };
+
+    let cost_model = guardian_core::telemetry::CostModel::default();
+    let (event_type, tier_triggered, estimated_cost_saved_usd) = if redacted_count > 0 {
+        let tier = if secret_types.contains(&guardian_core::redact::PiiType::Person) {
+            guardian_core::telemetry::DetectionTier::Tier3Ner
+        } else if secret_types.contains(&guardian_core::redact::PiiType::HighEntropy) {
+            guardian_core::telemetry::DetectionTier::Tier2Entropy
+        } else if secret_types.contains(&guardian_core::redact::PiiType::Custom) {
+            guardian_core::telemetry::DetectionTier::CustomRule
+        } else {
+            guardian_core::telemetry::DetectionTier::Tier1Regex
+        };
+        let savings = cost_model.calculate_event_savings(
+            guardian_core::telemetry::TelemetryEventType::PiiIntercepted,
+            &secret_types,
+            redacted_count,
+        );
+        (
+            guardian_core::telemetry::TelemetryEventType::PiiIntercepted,
+            Some(tier),
+            savings,
+        )
+    } else {
+        (
+            guardian_core::telemetry::TelemetryEventType::Passthrough,
+            None,
+            0.0,
+        )
+    };
+
+    if let Some(ref tx) = state.telemetry_tx {
+        let event = guardian_core::telemetry::TelemetryEvent {
+            timestamp: guardian_core::telemetry::TelemetryEvent::current_timestamp(),
+            request_id: request_id.clone(),
+            event_type,
+            tier_triggered,
+            secret_types,
+            redacted_count,
+            sandbox_violation: None,
+            model: model_name.clone(),
+            latency_ms: start_time.elapsed().as_millis() as u64,
+            estimated_cost_saved_usd,
+        };
+        let _ = tx.send(event);
+    }
+
+    // Inject system prompt guard instruction for Anthropic (AD-11)
+    let guard_instruction = "IMPORTANT: Do not alter, mutate, lowercase, or reformulate any token matching the pattern [REDACTED_*]. These tokens are placeholders and must be preserved exactly as-is.";
+    if let Some(sys) = payload.get_mut("system") {
+        if let Some(s) = sys.as_str() {
+            *sys = serde_json::Value::String(format!("{}\n\n{}", guard_instruction, s));
+        } else if let Some(arr) = sys.as_array_mut() {
+            arr.insert(
+                0,
+                serde_json::json!({
+                    "type": "text",
+                    "text": guard_instruction
+                }),
+            );
+        }
+    } else {
+        payload["system"] = serde_json::Value::String(guard_instruction.to_string());
+    }
+
+    // Serialize modified payload
+    let new_bytes = serde_json::to_vec(&payload)
+        .map_err(|e| ProxyError::Internal(format!("Failed to serialize payload: {}", e)))?;
+
+    // Reconstruct target URL for Anthropic
+    let query = uri.query();
+    let mut target_url = if headers.contains_key("x-firewall-mitm") {
+        if let Some(host_header) = headers.get(axum::http::header::HOST) {
+            if let Ok(host_str) = host_header.to_str() {
+                reqwest::Url::parse(&format!("https://{}", host_str))
+                    .unwrap_or_else(|_| state.upstream_url.clone())
+            } else {
+                state.upstream_url.clone()
+            }
+        } else {
+            state.upstream_url.clone()
+        }
+    } else if let Ok(anthropic_url) = std::env::var("ANTHROPIC_UPSTREAM_URL") {
+        reqwest::Url::parse(&anthropic_url).unwrap_or_else(|_| state.upstream_url.clone())
+    } else if state.upstream_url.host_str() == Some("api.openai.com") {
+        reqwest::Url::parse("https://api.anthropic.com")
+            .unwrap_or_else(|_| state.upstream_url.clone())
+    } else {
+        state.upstream_url.clone()
+    };
+
+    let base_path = target_url.path().trim_end_matches('/');
+    let joined_path = if base_path.is_empty() {
+        "/v1/messages".to_string()
+    } else {
+        format!("{}/v1/messages", base_path)
+    };
+    target_url.set_path(&joined_path);
+
+    let merged_query = merge_queries(&state.upstream_url, query);
+    target_url.set_query(merged_query.as_deref());
+
+    // Prepare headers
+    let mut req_headers = copy_request_headers(&headers, &target_url)?;
+    let length = new_bytes.len();
+    req_headers.insert(
+        reqwest::header::CONTENT_LENGTH,
+        reqwest::header::HeaderValue::from(length),
+    );
+
+    // Send request
+    let reqwest_body = reqwest::Body::from(new_bytes);
+    let mut req_builder = state.client.request(method.clone(), target_url.clone());
+    req_builder = req_builder.headers(req_headers).body(reqwest_body);
+
+    let response = req_builder.send().await.map_err(|e| {
+        if e.is_timeout() {
+            ProxyError::Timeout(e.to_string())
+        } else if e.is_connect() || e.is_builder() || e.is_request() {
+            ProxyError::Upstream(e.to_string())
+        } else {
+            ProxyError::Internal(e.to_string())
+        }
+    })?;
+
+    let status = response.status();
+    let mut res_headers = copy_response_headers(response.headers())?;
+
+    let duration = start_time.elapsed().as_millis();
+    tracing::info!(
+        method = method.as_str(),
+        path = "/v1/messages",
+        duration_ms = duration,
+        status_code = status.as_u16(),
+        "Intercepted Anthropic messages request proxied successfully"
+    );
+
+    // Detect SSE
+    let is_sse = res_headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.contains("text/event-stream"))
+        .unwrap_or(false);
+
+    let axum_body = if is_sse {
+        res_headers.remove(axum::http::header::CONTENT_LENGTH);
+        create_sse_response_stream(
+            response,
+            token_map_arc,
+            state.telemetry_tx.clone(),
+            request_id,
+            model_name,
+        )
+    } else {
+        // For non-streaming responses, restore tokens if JSON
+        let content_type = res_headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if status.is_success() && content_type.contains("application/json") {
+            let res_bytes = response
+                .bytes()
+                .await
+                .map_err(|e| ProxyError::Upstream(e.to_string()))?;
+
+            if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&res_bytes) {
+                let (tokens, original_values) = {
+                    let lock = token_map_arc.lock().unwrap();
+                    let mut t = Vec::new();
+                    let mut v = Vec::new();
+                    for k in lock.keys() {
+                        if let Some((secret, _)) = lock.get(k) {
+                            t.push(k.clone());
+                            v.push(secret.clone());
+                        }
+                    }
+                    (t, v)
+                };
+
+                if !tokens.is_empty() {
+                    if let Ok(ac) = aho_corasick::AhoCorasick::new(&tokens) {
+                        if let Some(content_arr) =
+                            json.get_mut("content").and_then(|c| c.as_array_mut())
+                        {
+                            for block in content_arr {
+                                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                    if let Some(text) =
+                                        block.get_mut("text").and_then(|t| t.as_str())
+                                    {
+                                        let replaced = ac.replace_all(text, &original_values);
+                                        block["text"] = serde_json::Value::String(replaced);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let out_bytes = serde_json::to_vec(&json)
+                    .map_err(|e| ProxyError::Internal(format!("Serialization error: {}", e)))?;
+                res_headers.insert(
+                    axum::http::header::CONTENT_LENGTH,
+                    axum::http::HeaderValue::from(out_bytes.len()),
+                );
+                Body::from(out_bytes)
+            } else {
+                Body::from(res_bytes)
+            }
+        } else {
+            Body::from_stream(response.bytes_stream())
+        }
+    };
+
+    let mut axum_res_builder = Response::builder().status(status.as_u16());
+    if let Some(headers_mut) = axum_res_builder.headers_mut() {
+        *headers_mut = res_headers;
+    }
+
+    Ok(axum_res_builder.body(axum_body).unwrap_or_else(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": "Security pipeline failure" })),
+        )
+            .into_response()
+    }))
 }
 
 /// Builds a dynamic HTTP response mimicking an LLM provider block.
@@ -1106,32 +1209,5 @@ pub fn make_dynamic_block_response(
                 .body(Body::from(serde_json::to_vec(&body).unwrap()))
                 .unwrap()
         }
-    }
-}
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn find_double_newline_found() {
-        let data = b"data: hello\n\ndata: world\n\n";
-        assert_eq!(find_double_newline(data), Some(13));
-    }
-
-    #[test]
-    fn find_double_newline_not_found() {
-        let data = b"data: hello\n";
-        assert_eq!(find_double_newline(data), None);
-    }
-
-    #[test]
-    fn find_double_newline_at_start() {
-        let data = b"\n\ndata: hello\n\n";
-        assert_eq!(find_double_newline(data), Some(2));
-    }
-
-    #[test]
-    fn find_double_newline_empty() {
-        assert_eq!(find_double_newline(b""), None);
     }
 }

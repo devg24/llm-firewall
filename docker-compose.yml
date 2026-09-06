@@ -1,0 +1,28 @@
+services:
+  llm-firewall:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: llm-firewall:latest
+    container_name: llm-firewall
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - UPSTREAM_URL=https://api.openai.com
+      - ANTHROPIC_UPSTREAM_URL=https://api.anthropic.com
+      - RUST_LOG=info
+    volumes:
+      - firewall-data:/data
+      - firewall-logs:/home/guardian/.guardian
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  firewall-data:
+  firewall-logs:

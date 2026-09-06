@@ -10,6 +10,7 @@
 pub mod connect;
 pub mod ide_adapters;
 pub mod proxy;
+pub mod sse;
 
 use axum::{routing::get, Router};
 use guardian_core::domain::DomainProfile;
@@ -17,7 +18,7 @@ use guardian_core::ml::SharedModel;
 use std::sync::Arc;
 
 pub use guardian_core::telemetry::{spawn_telemetry_writer, TelemetryWriter};
-pub use proxy::{chat_completions_handler, proxy_handler, ProxyError};
+pub use proxy::{anthropic_messages_handler, chat_completions_handler, proxy_handler, ProxyError};
 
 /// Shared application state injected into every Axum handler via `State<AppState>`.
 ///
@@ -50,8 +51,9 @@ pub struct AppState {
 ///
 /// Routes:
 /// - `GET /health` — liveness check, returns `"OK"`
-/// - `POST /v1/chat/completions` — PII-intercepting completions handler
-/// - All other methods on `/v1/chat/completions` — generic passthrough
+/// - `POST /v1/chat/completions` — PII-intercepting OpenAI completions handler
+/// - `POST /v1/messages` — PII-intercepting Anthropic messages handler
+/// - All other methods on `/v1/chat/completions` or `/v1/messages` — generic passthrough
 /// - `ANY /{*path}` — generic passthrough for all other paths
 pub fn create_app(state: AppState) -> Router {
     Router::new()
@@ -63,6 +65,14 @@ pub fn create_app(state: AppState) -> Router {
         .route(
             "/v1/chat/completions/",
             axum::routing::post(proxy::chat_completions_handler).fallback(proxy::proxy_handler),
+        )
+        .route(
+            "/v1/messages",
+            axum::routing::post(proxy::anthropic_messages_handler).fallback(proxy::proxy_handler),
+        )
+        .route(
+            "/v1/messages/",
+            axum::routing::post(proxy::anthropic_messages_handler).fallback(proxy::proxy_handler),
         )
         .route("/{*path}", axum::routing::any(proxy::proxy_handler))
         .with_state(state)

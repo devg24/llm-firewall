@@ -1,0 +1,8 @@
+target/
+.git/
+.venv/
+.agent/
+.system_generated/
+*.log
+.DS_Store
+.llm-firewall-certs/

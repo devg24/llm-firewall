@@ -71,6 +71,17 @@ cargo build --release
 sudo cp target/release/llm-firewall-rs /usr/local/bin/llm-firewall
 ```
 
+**Option D: Docker Container / Centralized Team Gateway**
+```bash
+# Run with Docker Compose
+docker compose up -d
+
+# Or run directly via Docker CLI
+docker run -d -p 3000:3000 \
+  -e UPSTREAM_URL="https://api.anthropic.com" \
+  ghcr.io/devg24/llm-firewall:latest
+```
+
 ### 2. Scan your repository for exposed secrets
 
 ```bash
@@ -95,6 +106,7 @@ USAGE:
 
 COMMANDS:
     scan        Scan workspace for exposed secrets and generate a risk report
+    exec        Supervised agent runner with process-isolated proxy (Claude Code, etc.)
     on          Start transparent MITM proxy and configure installed tools
     preflight   Generate and approve an unattended security plan for autonomous agents
     stats       Display aggregate detection metrics and financial risk avoided
@@ -131,7 +143,24 @@ llm-firewall scan
 
 ---
 
-### 2. `llm-firewall on`
+### 2. `llm-firewall exec -- <cmd>` (Recommended for Claude Code & Agent CLIs)
+Supervise any autonomous coding assistant with zero setup friction. Starts an ephemeral proxy on loopback and injects `ANTHROPIC_BASE_URL` and proxy environment variables **strictly into the child process**.
+
+- **No `sudo` required**
+- **Zero OS certificate modifications**
+- **Zero global settings pollution** (all proxy routing terminates cleanly when the agent exits)
+
+```bash
+# Run Claude Code through LLM Firewall
+llm-firewall exec -- claude
+
+# Run OpenHands or SWE-bench
+llm-firewall exec -- openhands
+```
+
+---
+
+### 3. `llm-firewall on`
 Start the MITM proxy with automated OS trust management.
 
 ```bash
@@ -146,7 +175,7 @@ llm-firewall on
 
 ---
 
-### 3. `llm-firewall preflight`
+### 4. `llm-firewall preflight`
 Security plan generator for long-running autonomous agent workflows (Claude Code, SWE-bench, OpenHands).
 
 Before running unattended AI coding tasks, pre-approve sensitive zones and confine the agent to your workspace.
@@ -187,7 +216,7 @@ llm-firewall preflight --clear
 
 ---
 
-### 4. `llm-firewall stats`
+### 5. `llm-firewall stats`
 Inspect aggregate detection counts and calculated risk reduction.
 
 ```bash
@@ -224,7 +253,7 @@ llm-firewall stats --json
 
 ---
 
-### 5. `llm-firewall report`
+### 6. `llm-firewall report`
 Export audit reports for compliance reviews and security teams.
 
 ```bash
@@ -304,12 +333,12 @@ flowchart TD
 
 | Tool | Integration Mode | Mechanism | Setup |
 | :--- | :--- | :--- | :--- |
+| **Claude Code** | Native Reverse Proxy / Process Supervisor | Intercepts `/v1/messages` with reversible pseudonymization & sink blocking | `llm-firewall exec -- claude` or set `ANTHROPIC_BASE_URL="http://localhost:3000"` |
 | **Cursor** | Single-Port TCP CONNECT Tunneling | Deep `RunSSE` / `BidiAppend` payload interception with inline block responses | Automated via `llm-firewall on` |
-| **Claude Code** | Transparent Forward Proxy | Sets `HTTP_PROXY` / `HTTPS_PROXY` with CA trust | Automated via `llm-firewall on` |
 | **GitHub Copilot** | VS Code / JetBrains Proxy | Configures `http.proxy` and local certificate trust | Automated via `llm-firewall on` |
-| **OpenAI / Anthropic SDKs** | Reverse Proxy Multiplexer | Set `base_url = "http://localhost:3000/v1"` | Zero code changes required |
+| **OpenAI / Anthropic SDKs** | Dual Reverse Proxy Multiplexer | Standard REST endpoints (`/v1/chat/completions` & `/v1/messages`) | Set `base_url` to `http://localhost:3000/v1` or `http://localhost:3000` |
 | **LangChain / LlamaIndex** | Standard HTTP/HTTPS Proxy | Native HTTP proxy support via single-port peeker | Set proxy env or client config |
-| **Autonomous Agents (SWE-bench, Devin)** | Sandboxed Execution | `llm-firewall preflight` + `llm-firewall on` | Path jail and pre-approved plan |
+| **Autonomous Agents (SWE-bench, OpenHands)** | Sandboxed Process Execution | Preflight physical path jail + ephemeral proxy supervision | `llm-firewall exec -- <agent_command>` |
 
 ---
 

@@ -25,8 +25,9 @@ pub use plan::{
 pub use redact::{
     aws_regex, bearer_regex, cc_regex, collect_regex_matches, email_regex, gcp_regex, github_regex,
     init_regexes, ip_regex, ipv6_regex, mutate_content_field, normalize_text, phone_regex,
-    process_completions_payload, process_completions_payload_with_map, redact_text,
-    resolve_overlaps, ssn_regex, PiiMatch, PiiType, RedactionState,
+    process_anthropic_payload_with_orchestrator, process_completions_payload,
+    process_completions_payload_with_map, redact_text, resolve_overlaps, ssn_regex, PiiMatch,
+    PiiType, RedactionState,
 };
 pub use report::{
     generate_json_report, generate_markdown_report, ComplianceMapping, JsonAuditReport,
